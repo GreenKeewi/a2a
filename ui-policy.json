@@ -1,0 +1,80 @@
+{
+  "fonts": [
+    "Arial",
+    "Helvetica",
+    "sans-serif"
+  ],
+  "fontSizes": [
+    10,
+    11,
+    12,
+    13,
+    14,
+    16,
+    19,
+    20,
+    23,
+    27,
+    44,
+    56,
+    72
+  ],
+  "typeRules": [
+    {
+      "selector": "h1",
+      "sizes": [
+        44,
+        56,
+        72
+      ]
+    },
+    {
+      "selector": "h2",
+      "sizes": [
+        20
+      ]
+    },
+    {
+      "selector": "h3",
+      "sizes": [
+        20
+      ]
+    },
+    {
+      "selector": "button, [role=button]",
+      "sizes": [
+        14,
+        16
+      ]
+    }
+  ],
+  "minControlSize": 44,
+  "controlSizeRules": [],
+  "minControlGap": 8,
+  "minControlInset": 8,
+  "controlContainers": [
+    "[data-ui-container]"
+  ],
+  "contentInsetRules": [],
+  "iconSizeRules": [],
+  "minLayoutGap": 8,
+  "bannedCopy": [
+    "unlock your potential",
+    "seamlessly",
+    "game-changing"
+  ],
+  "viewports": [
+    {
+      "width": 390,
+      "height": 844
+    },
+    {
+      "width": 1440,
+      "height": 900
+    }
+  ],
+  "colorSchemes": [
+    "light"
+  ],
+  "exceptions": []
+}
