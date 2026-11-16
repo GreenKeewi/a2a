@@ -7,8 +7,8 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 
 import {
   authenticateAgentToken, createAgent, createPairingCode, exchangePairingCode,
-  getAgentBriefing, heartbeatAgent, listAgentInbox, listAgents, readAgentMessage, readAgentThread,
-  resolveCoordinationItem, revokeAgent, revokeAgentToken, sendAgentMessage,
+  getAgentBriefing, heartbeatAgent, listAgentInbox, listAgentTokensForHuman, listAgents, readAgentMessage, readAgentThread,
+  resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage,
 } from "./agents";
 
 const adminUrl = process.env.TEST_DATABASE_URL;
@@ -41,22 +41,32 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await sql.end();
+  await sql.end({ timeout: 5 });
   await admin.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
   await admin.end();
-});
+}, 60_000);
 
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });
   const code = await createPairingCode(sql, alphaId, created.id, ownerId);
   await expect(createPairingCode(sql, betaId, created.id, ownerId)).rejects.toThrow("FORBIDDEN");
-  const paired = await exchangePairingCode(sql, code);
-  expect(paired.token).toMatch(/^a2a_[A-Za-z0-9_-]{43}$/);
+  const replacementCode = await createPairingCode(sql, alphaId, created.id, ownerId);
   await expect(exchangePairingCode(sql, code)).rejects.toThrow("INVALID_PAIRING_CODE");
+  const paired = await exchangePairingCode(sql, replacementCode);
+  expect(paired.token).toMatch(/^a2a_[A-Za-z0-9_-]{43}$/);
+  await expect(exchangePairingCode(sql, replacementCode)).rejects.toThrow("INVALID_PAIRING_CODE");
   const principal = await authenticateAgentToken(sql, paired.token);
   expect(principal.agentId).toBe(created.id);
-  await revokeAgentToken(sql, principal);
+  const listed = await listAgentTokensForHuman(sql, alphaId, ownerId, created.id);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.displayPrefix).toBe(paired.token.slice(0, 12));
+  await revokeAgentTokenForHuman(sql, alphaId, ownerId, created.id, listed[0]!.id);
   await expect(authenticateAgentToken(sql, paired.token)).rejects.toThrow("UNAUTHENTICATED");
+  const nextCode = await createPairingCode(sql, alphaId, created.id, ownerId);
+  const nextPair = await exchangePairingCode(sql, nextCode);
+  const nextPrincipal = await authenticateAgentToken(sql, nextPair.token);
+  await revokeAgentToken(sql, nextPrincipal);
+  await expect(authenticateAgentToken(sql, nextPair.token)).rejects.toThrow("UNAUTHENTICATED");
 });
 
 it("deduplicates a send and leaves group receipts independent", async () => {
@@ -87,11 +97,40 @@ it("deduplicates a send and leaves group receipts independent", async () => {
   const firstPage = await listAgentInbox(sql, { agentId: a.id, organizationId: alphaId }, { unreadOnly: false, limit: 1 });
   expect(firstPage.nextCursor).not.toBeNull();
   const secondPage = await listAgentInbox(sql, { agentId: a.id, organizationId: alphaId }, { unreadOnly: false, limit: 1, cursor: firstPage.nextCursor });
+  expect(secondPage.items).toHaveLength(1);
   expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
   await readAgentMessage(sql, { agentId: a.id, organizationId: alphaId }, first.messageId);
   const receipts = await sql`SELECT agent_id, read_at FROM message_recipients WHERE message_id = ${first.messageId}`;
   expect(receipts.find((row) => row.agent_id === a.id)?.read_at).not.toBeNull();
   expect(receipts.find((row) => row.agent_id === b.id)?.read_at).toBeNull();
+  const privateReply = await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
+    to: "codex-db", type: "fyi", subject: "Only DB", body: "Private details", threadId: first.threadId, replyTo: first.messageId, clientMessageId: randomUUID(),
+  });
+  expect((await readAgentThread(sql, { agentId: a.id, organizationId: alphaId }, first.threadId)).messages.some((message) => message.id === privateReply.messageId)).toBe(true);
+  expect((await readAgentThread(sql, { agentId: b.id, organizationId: alphaId }, first.threadId)).messages.some((message) => message.id === privateReply.messageId)).toBe(false);
+  await expect(readAgentMessage(sql, { agentId: b.id, organizationId: alphaId }, privateReply.messageId)).rejects.toThrow("NOT_FOUND");
+});
+
+it("pages all messages created within the same second without gaps", async () => {
+  const sender = await createAgent(sql, alphaId, ownerId, { handle: "cursor-sender", hostType: "codex", role: "Cursor", scopes: [] });
+  const reader = await createAgent(sql, alphaId, ownerId, { handle: "cursor-reader", hostType: "claude-code", role: "Reader", scopes: [] });
+  const sent = [];
+  for (let index = 0; index < 3; index++) {
+    sent.push(await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
+      to: reader.handle, type: "fyi", subject: `Cursor ${index}`, body: "Paging", clientMessageId: randomUUID(),
+    }));
+  }
+  for (let index = 0; index < sent.length; index++) {
+    await sql`UPDATE messages SET created_at = ${`2026-11-15T12:00:00.${(index + 1).toString().padStart(6, "0")}Z`}::timestamptz WHERE id = ${sent[index]!.messageId}`;
+  }
+  let cursor: string | null = null;
+  const seen: string[] = [];
+  do {
+    const page = await listAgentInbox(sql, { agentId: reader.id, organizationId: alphaId }, { unreadOnly: false, limit: 1, ...(cursor ? { cursor } : {}) });
+    seen.push(...page.items.map((item) => item.id));
+    cursor = page.nextCursor;
+  } while (cursor);
+  expect(seen).toEqual(sent.map((item) => item.messageId).reverse());
 });
 
 it("returns safe HTTP envelopes for foreign IDs and revoked tokens", async () => {

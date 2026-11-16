@@ -81,6 +81,7 @@ export async function createPairingCode(sql: Sql, organizationId: string, agentI
       FOR SHARE OF a, m
     `;
     if (!rows[0]) throw new AgentError("FORBIDDEN");
+    await tx`UPDATE agent_pairing_codes SET expires_at = now() WHERE agent_id = ${agentId} AND used_at IS NULL AND expires_at > now()`;
     await tx`
       INSERT INTO agent_pairing_codes (agent_id, code_hash, expires_at)
       VALUES (${agentId}, ${hash(code)}, now() + interval '10 minutes')
@@ -145,6 +146,36 @@ export async function revokeAgentToken(sql: Sql, principal: AgentPrincipal) {
     `;
     if (!rows.length) throw new AgentError("NOT_FOUND");
     await tx`INSERT INTO audit_events (organization_id, actor_agent_id, action, target_id) VALUES (${principal.organizationId}, ${principal.agentId}, 'token.revoked', ${tokenId})`;
+    return { revoked: true };
+  });
+}
+
+export async function listAgentTokensForHuman(sql: Sql, organizationId: string, userId: string, agentId: string) {
+  const authorized = await sql`
+    SELECT 1 FROM agents a JOIN member m ON m.organization_id = a.organization_id
+    WHERE a.id = ${agentId} AND a.organization_id = ${organizationId} AND m.user_id = ${userId}
+      AND (a.created_by_user_id = ${userId} OR m.role = 'owner')
+  `;
+  if (!authorized.length) throw new AgentError("NOT_FOUND");
+  const tokens = await sql`
+    SELECT id, display_prefix, created_at, last_used_at FROM agent_tokens
+    WHERE agent_id = ${agentId} AND revoked_at IS NULL ORDER BY created_at DESC
+  `;
+  return tokens.map((row) => ({ id: String(row.id), displayPrefix: String(row.display_prefix),
+    createdAt: (row.created_at as Date).toISOString(), lastUsedAt: row.last_used_at ? (row.last_used_at as Date).toISOString() : null }));
+}
+
+export async function revokeAgentTokenForHuman(sql: Sql, organizationId: string, userId: string, agentId: string, tokenId: string) {
+  return sql.begin(async (tx) => {
+    const authorized = await tx`
+      SELECT 1 FROM agents a JOIN member m ON m.organization_id = a.organization_id
+      WHERE a.id = ${agentId} AND a.organization_id = ${organizationId} AND m.user_id = ${userId}
+        AND (a.created_by_user_id = ${userId} OR m.role = 'owner') FOR SHARE OF a, m
+    `;
+    if (!authorized.length) throw new AgentError("NOT_FOUND");
+    const tokens = await tx`UPDATE agent_tokens SET revoked_at = now() WHERE id = ${tokenId} AND agent_id = ${agentId} AND revoked_at IS NULL RETURNING id`;
+    if (!tokens.length) throw new AgentError("NOT_FOUND");
+    await tx`INSERT INTO audit_events (organization_id, actor_user_id, action, target_id) VALUES (${organizationId}, ${userId}, 'token.revoked', ${tokenId})`;
     return { revoked: true };
   });
 }
@@ -218,9 +249,29 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
       const sender = await tx`SELECT id FROM agents WHERE id = ${principal.agentId} AND organization_id = ${principal.organizationId} AND revoked_at IS NULL`;
       if (!sender.length) throw new AgentError("UNAUTHENTICATED");
       const active = await tx`SELECT id, handle, scopes FROM agents WHERE organization_id = ${principal.organizationId} AND revoked_at IS NULL`;
-      const recipients = resolveRecipients(active.map((row) => ({ id: String(row.id), handle: String(row.handle), scopes: row.scopes as string[] })), principal.agentId,
-        Array.isArray(parsed.data.to) ? parsed.data.to : [parsed.data.to]);
+      const allAgents = active.map((row) => ({ id: String(row.id), handle: String(row.handle), scopes: row.scopes as string[] }));
+      const targets = Array.isArray(parsed.data.to) ? parsed.data.to : [parsed.data.to];
       let threadId = parsed.data.threadId;
+      if (parsed.data.replyTo) {
+        const reply = await tx`
+          SELECT m.thread_id FROM messages m JOIN thread_agent_members tm ON tm.thread_id = m.thread_id
+          WHERE m.id = ${parsed.data.replyTo} AND m.organization_id = ${principal.organizationId} AND tm.agent_id = ${principal.agentId}
+            AND (m.sender_agent_id = ${principal.agentId} OR EXISTS (
+              SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.agent_id = ${principal.agentId}
+            ))
+        `;
+        const original = reply[0];
+        if (!original) throw new AgentError("NOT_FOUND");
+        if (threadId && threadId !== String(original.thread_id)) throw new AgentError("INVALID_REQUEST");
+        threadId = String(original.thread_id);
+      }
+      let routingAgents = allAgents;
+      if (threadId && targets.includes("*")) {
+        const members = await tx`SELECT agent_id FROM thread_agent_members WHERE thread_id = ${threadId}`;
+        const memberIds = new Set(members.map((member) => String(member.agent_id)));
+        routingAgents = allAgents.filter((agent) => memberIds.has(agent.id));
+      }
+      const recipients = resolveRecipients(routingAgents, principal.agentId, targets);
       if (threadId) {
         const thread = await tx`
           SELECT t.id FROM threads t JOIN thread_agent_members tm ON tm.thread_id = t.id
@@ -236,10 +287,6 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
         for (const memberId of [principal.agentId, ...recipients.map((recipient) => recipient.id)]) {
           await tx`INSERT INTO thread_agent_members (thread_id, agent_id) VALUES (${threadId}, ${memberId})`;
         }
-      }
-      if (parsed.data.replyTo) {
-        const reply = await tx`SELECT 1 FROM messages WHERE id = ${parsed.data.replyTo} AND thread_id = ${threadId} AND organization_id = ${principal.organizationId}`;
-        if (!reply.length) throw new AgentError("NOT_FOUND");
       }
       const messageId = randomUUID();
       const priority = parsed.data.type === "blocker" ? "high" : parsed.data.priority ?? "normal";
@@ -295,6 +342,7 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   args.push(parsed.data.limit + 1);
   const rows = await sql.unsafe(`
     SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.created_at,
+           to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
            a.handle AS sender_handle, r.read_at
     FROM message_recipients r JOIN messages m ON m.id = r.message_id
     JOIN agents a ON a.id = m.sender_agent_id
@@ -304,7 +352,7 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   const items = rows.slice(0, parsed.data.limit).map((row) => ({
     id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
     subject: String(row.subject), senderHandle: String(row.sender_handle),
-    createdAt: new Date(String(row.created_at)).toISOString(), unread: row.read_at === null,
+    createdAt: (row.created_at as Date).toISOString(), unread: row.read_at === null,
   }));
   const deliveredIds = items.map((item) => item.id);
   if (deliveredIds.length) await sql`
@@ -312,7 +360,8 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
     WHERE agent_id = ${principal.agentId} AND message_id = ANY(${deliveredIds}::uuid[])
   `;
   const last = items.at(-1);
-  return { items, nextCursor: rows.length > parsed.data.limit && last ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null,
+  const lastRow = rows[Math.min(rows.length, parsed.data.limit) - 1];
+  return { items, nextCursor: rows.length > parsed.data.limit && last && lastRow ? encodeCursor({ createdAt: String(lastRow.cursor_created_at), id: last.id }) : null,
     briefing: parsed.data.includeBriefing ? await getAgentBriefing(sql, principal) : undefined };
 }
 
@@ -349,7 +398,7 @@ export async function readAgentMessage(sql: Sql, principal: AgentPrincipal, mess
   const row = rows[0];
   if (!row) throw new AgentError("NOT_FOUND");
   return { id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
-    subject: String(row.subject), body: String(row.body), parts: row.parts, createdAt: new Date(String(row.created_at)).toISOString() };
+    subject: String(row.subject), body: String(row.body), parts: row.parts, createdAt: (row.created_at as Date).toISOString() };
 }
 
 export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threadId: string) {
@@ -365,6 +414,9 @@ export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threa
              a.handle AS sender_handle
       FROM messages m LEFT JOIN agents a ON a.id = m.sender_agent_id
       WHERE m.thread_id = ${threadId} AND m.organization_id = ${principal.organizationId}
+        AND (m.sender_agent_id = ${principal.agentId} OR EXISTS (
+          SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.agent_id = ${principal.agentId}
+        ))
       ORDER BY m.created_at DESC, m.id DESC LIMIT 4
     `;
     const ids = rows.map((row) => String(row.id));
@@ -379,7 +431,7 @@ export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threa
         id: String(row.id), type: String(row.type), priority: String(row.priority),
         subject: String(row.subject), body: String(row.body), parts: row.parts,
         senderHandle: row.sender_handle ? String(row.sender_handle) : null,
-        createdAt: new Date(String(row.created_at)).toISOString(),
+        createdAt: (row.created_at as Date).toISOString(),
       })),
     };
   });
