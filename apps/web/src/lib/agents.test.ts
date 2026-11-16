@@ -279,7 +279,7 @@ it("deduplicates a send and leaves group receipts independent", async () => {
   const secondPage = await listAgentInbox(sql, { agentId: a.id, organizationId: alphaId }, { unreadOnly: false, limit: 1, cursor: firstPage.nextCursor });
   expect(secondPage.items).toHaveLength(1);
   expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
-  await readAgentMessage(sql, { agentId: a.id, organizationId: alphaId }, first.messageId);
+  expect((await readAgentMessage(sql, { agentId: a.id, organizationId: alphaId }, first.messageId)).senderHandle).toBe(sender.handle);
   const receipts = await sql`SELECT agent_id, read_at FROM message_recipients WHERE message_id = ${first.messageId}`;
   expect(receipts.find((row) => row.agent_id === a.id)?.read_at).not.toBeNull();
   expect(receipts.find((row) => row.agent_id === b.id)?.read_at).toBeNull();

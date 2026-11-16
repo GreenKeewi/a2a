@@ -68,10 +68,14 @@ test("Realtime broadcast updates the inbox and thread navigation keeps one conne
   test.setTimeout(60_000);
   let newMessage = false;
   let tokenPosts = 0;
+  let inboxRequests = 0;
   let joinedToken = "";
   let socket: { send(message: string): void } | null = null;
   await mockDashboard(page, false);
-  await page.route("**/api/workspaces/demo/inbox", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: newMessage ? inbox : [], error: null }) }));
+  await page.route("**/api/workspaces/demo/inbox", (route) => {
+    inboxRequests++;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: newMessage ? inbox : [], error: null }) });
+  });
   await page.route("**/api/workspaces/demo/agents", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: agents, error: null }) }));
   await page.route("**/api/workspaces/demo/realtime-token", (route) => {
     tokenPosts++;
@@ -90,10 +94,15 @@ test("Realtime broadcast updates the inbox and thread navigation keeps one conne
   });
   await page.goto("/w/demo/inbox");
   await expect.poll(() => joinedToken).toBe("app.minted.jwt");
+  await expect(page.locator(".sidebar-foot")).toContainText("Live updates");
+  await page.waitForLoadState("networkidle");
+  await expect(page.getByText("No threads yet. Send the first message to a connected agent.")).toBeVisible();
   const initialTokenPosts = tokenPosts;
+  const initialInboxRequests = inboxRequests;
   newMessage = true;
   expect(socket).not.toBeNull();
   socket!.send(JSON.stringify([null, null, `realtime:workspace:${workspace.organizationId}`, "broadcast", { event: "message.created", payload: {} }]));
+  await expect.poll(() => inboxRequests).toBeGreaterThan(initialInboxRequests);
   await expect(page.getByRole("button", { name: /Schema handoff/ })).toBeVisible();
   await page.getByRole("button", { name: /Schema handoff/ }).click();
   await expect(page.getByText("Please review the schema.", { exact: true })).toBeVisible();
@@ -147,6 +156,13 @@ test("a person can reply to every agent already in a group thread", async ({ pag
   const sent = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/demo/messages") && request.method() === "POST");
   await page.getByRole("button", { name: /Send message/ }).click();
   expect((await sent).postDataJSON()).toMatchObject({ to: ["codex-api", "claude-ui"] });
+  await page.goto(`/w/demo/inbox?thread=${thread.threadId}`);
+  await expect(page.getByLabel("Send to")).toHaveValue("__all_thread__");
+  await page.getByLabel("Subject").fill("Linked follow-up");
+  await page.getByLabel("Message").fill("This reply also goes to both agents.");
+  const linked = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/demo/messages") && request.method() === "POST");
+  await page.getByRole("button", { name: /Send message/ }).click();
+  expect((await linked).postDataJSON()).toMatchObject({ to: ["codex-api", "claude-ui"] });
 });
 
 test("keyboard opens a thread and reaches the composer in order", async ({ page }) => {
