@@ -97,7 +97,7 @@ export async function exchangePairingCode(sql: Sql, input: string) {
   const codeHash = hash(code);
   return sql.begin(async (tx) => {
     const rows = await tx`
-      SELECT p.id, p.code_hash, p.agent_id, p.expires_at, p.used_at, a.organization_id, a.revoked_at
+      SELECT p.id, p.code_hash, p.agent_id, p.expires_at, p.used_at, a.organization_id, a.revoked_at, a.host_type
       FROM agent_pairing_codes p JOIN agents a ON a.id = p.agent_id
       WHERE p.code_hash = ${codeHash} AND p.used_at IS NULL AND p.expires_at > now() AND a.revoked_at IS NULL FOR UPDATE OF p
     `;
@@ -113,7 +113,7 @@ export async function exchangePairingCode(sql: Sql, input: string) {
       VALUES (${tokenId}, ${row.agent_id}, ${hash(token)}, ${token.slice(0, 12)})
     `;
     await tx`INSERT INTO audit_events (organization_id, actor_agent_id, action, target_id) VALUES (${row.organization_id}, ${row.agent_id}, 'token.issued', ${tokenId})`;
-    return { token, agentId: String(row.agent_id), organizationId: String(row.organization_id) };
+    return { token, agentId: String(row.agent_id), organizationId: String(row.organization_id), hostType: String(row.host_type) };
   });
 }
 
@@ -344,9 +344,10 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   const rows = await sql.unsafe(`
     SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.created_at,
            to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
-           a.handle AS sender_handle, r.read_at
+           coalesce(a.handle, u.name, 'member') AS sender_handle, r.read_at
     FROM message_recipients r JOIN messages m ON m.id = r.message_id
-    JOIN agents a ON a.id = m.sender_agent_id
+    LEFT JOIN agents a ON a.id = m.sender_agent_id
+    LEFT JOIN "user" u ON u.id = m.sender_user_id
     WHERE ${clauses.join(" AND ")}
     ORDER BY m.created_at DESC, m.id DESC LIMIT $${args.length}
   `, args);
@@ -364,6 +365,33 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   const lastRow = rows[Math.min(rows.length, parsed.data.limit) - 1];
   return { items, nextCursor: rows.length > parsed.data.limit && last && lastRow ? encodeCursor({ createdAt: String(lastRow.cursor_created_at), id: last.id }) : null,
     briefing: parsed.data.includeBriefing ? await getAgentBriefing(sql, principal) : undefined };
+}
+
+export async function pendingAgentNotices(sql: Sql, principal: AgentPrincipal) {
+  const rows = await sql`
+    SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.created_at,
+           coalesce(a.handle, u.name, 'member') AS sender_handle
+    FROM message_recipients r JOIN messages m ON m.id = r.message_id
+    LEFT JOIN agents a ON a.id = m.sender_agent_id
+    LEFT JOIN "user" u ON u.id = m.sender_user_id
+    WHERE r.agent_id = ${principal.agentId} AND m.organization_id = ${principal.organizationId}
+      AND r.notice_ack_at IS NULL AND r.read_at IS NULL
+    ORDER BY m.created_at ASC, m.id ASC LIMIT 25
+  `;
+  return rows.map((row) => ({
+    id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
+    subject: String(row.subject), senderHandle: String(row.sender_handle), createdAt: (row.created_at as Date).toISOString(), unread: true,
+  }));
+}
+
+export async function acknowledgeAgentNotices(sql: Sql, principal: AgentPrincipal, ids: string[]) {
+  const rows = await sql`
+    UPDATE message_recipients r SET notice_ack_at = now(), delivered_at = coalesce(r.delivered_at, now())
+    FROM messages m WHERE m.id = r.message_id AND r.message_id = ANY(${ids}::uuid[])
+      AND r.agent_id = ${principal.agentId} AND m.organization_id = ${principal.organizationId} AND r.notice_ack_at IS NULL
+    RETURNING r.message_id
+  `;
+  return { acknowledged: rows.map((row) => String(row.message_id)) };
 }
 
 export async function getAgentBriefing(sql: Sql, principal: AgentPrincipal) {

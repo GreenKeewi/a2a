@@ -6,21 +6,31 @@ export interface SyncApi {
   inbox(options: { cursor?: string; includeBriefing?: boolean; unreadOnly?: boolean; limit?: number }): Promise<{
     items: InboxHeader[]; nextCursor: string | null; briefing?: unknown;
   }>;
+  pendingNotices(): Promise<InboxHeader[]>;
+  acknowledgeNotices(ids: string[]): Promise<{ acknowledged: string[] }>;
 }
 
 export class SyncEngine {
   private running: Promise<SidecarCache> | null = null;
   private pending = false;
+  private writeQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly api: SyncApi, private readonly cachePath: string,
     private readonly onNotice: (header: InboxHeader, latencyMs: number) => void = () => {}) {}
 
   async cache() { return readCache(this.cachePath); }
 
+  private updateCache(change: (current: SidecarCache) => SidecarCache): Promise<SidecarCache> {
+    const write = this.writeQueue.then(async () => {
+      const next = change(await this.cache());
+      await writeCache(this.cachePath, next);
+      return next;
+    });
+    this.writeQueue = write.catch(() => {});
+    return write;
+  }
+
   async setConnection(connection: SidecarCache["connection"]) {
-    const cache = await this.cache();
-    const next = { ...cache, connection };
-    await writeCache(this.cachePath, next);
-    return next;
+    return this.updateCache((cache) => ({ ...cache, connection }));
   }
 
   async sync(): Promise<SidecarCache> {
@@ -38,35 +48,30 @@ export class SyncEngine {
   }
 
   private async run(): Promise<SidecarCache> {
-    const previous = await this.cache();
     const fetched: InboxHeader[] = [];
     let cursor: string | null = null;
-    let briefing: unknown = previous.briefing;
-    let reachedKnown = false;
+    let briefing: unknown;
     do {
       const page = await this.api.inbox({ ...(cursor ? { cursor } : {}), includeBriefing: !cursor, unreadOnly: false, limit: 25 });
       if (!cursor && page.briefing !== undefined) briefing = page.briefing;
-      for (const item of page.items) {
-        fetched.push(item);
-        if (item.id === previous.newestId) { reachedKnown = true; break; }
-      }
+      fetched.push(...page.items);
       cursor = page.nextCursor;
-      // Initial startup only needs a bounded local cache. Server inbox retains older items.
-      if (!previous.newestId && fetched.length >= 100) break;
-    } while (cursor && !reachedKnown);
-    const merged = [...fetched, ...previous.headers.filter((item) => !fetched.some((fresh) => fresh.id === item.id))].slice(0, 100);
-    const next: SidecarCache = {
-      ...previous, headers: merged, newestId: merged[0]?.id ?? previous.newestId,
-      briefing, briefingVersion: typeof briefing === "object" && briefing && "briefVersion" in briefing && typeof briefing.briefVersion === "number"
+    } while (cursor && fetched.length < 100);
+    const next = await this.updateCache((previous) => ({
+      ...previous, headers: fetched.slice(0, 100), newestId: fetched[0]?.id ?? null,
+      briefing: briefing ?? previous.briefing,
+      briefingVersion: typeof briefing === "object" && briefing && "briefVersion" in briefing && typeof briefing.briefVersion === "number"
         ? briefing.briefVersion : previous.briefingVersion,
       lastSyncedAt: new Date().toISOString(),
-    };
-    await writeCache(this.cachePath, next);
-    if (previous.newestId) {
-      for (const item of fetched) {
-        if (item.id === previous.newestId) break;
-        if (item.unread) this.onNotice(item, Math.max(0, Date.now() - new Date(item.createdAt).getTime()));
-      }
+    }));
+    // Pending notices are tracked per recipient in the database, independent of
+    // created_at order. A delayed transaction cannot hide behind a newer cursor.
+    for (;;) {
+      const pending = await this.api.pendingNotices();
+      if (!pending.length) break;
+      for (const item of pending) this.onNotice(item, Math.max(0, Date.now() - new Date(item.createdAt).getTime()));
+      await this.api.acknowledgeNotices(pending.map((item) => item.id));
+      if (pending.length < 25) break;
     }
     return next;
   }

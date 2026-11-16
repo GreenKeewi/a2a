@@ -7,9 +7,9 @@ import { decodeJwt, exportJWK, generateKeyPair, jwtVerify } from "jose";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import {
-  authenticateAgentToken, createAgent, createPairingCode, exchangePairingCode,
+  acknowledgeAgentNotices, authenticateAgentToken, createAgent, createPairingCode, exchangePairingCode,
   getAgentBriefing, heartbeatAgent, listAgentInbox, listAgentTokensForHuman, listAgents, readAgentMessage, readAgentThread,
-  resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage,
+  pendingAgentNotices, resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage,
 } from "./agents";
 import { mintRealtimeToken } from "./realtime";
 
@@ -38,7 +38,17 @@ beforeAll(async () => {
   process.env.SUPABASE_JWT_PRIVATE_JWK = JSON.stringify({ ...privateJwk, kid: "a2a-local-test" });
   process.env.SUPABASE_URL = "http://127.0.0.1:54321";
   process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_local_test";
+  await admin.unsafe(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon; END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated; END IF;
+  END $$`);
   await admin.unsafe(`CREATE DATABASE "${databaseName}"`);
+  await sql.unsafe(`CREATE SCHEMA realtime;
+    CREATE TABLE realtime.messages (id bigserial PRIMARY KEY);
+    ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+    CREATE FUNCTION realtime.topic() RETURNS text LANGUAGE sql STABLE AS $$ SELECT current_setting('realtime.topic', true) $$;
+    GRANT USAGE ON SCHEMA realtime TO authenticated;
+    GRANT SELECT ON realtime.messages TO authenticated;`);
   for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort()) {
     await sql.unsafe(await readFile(resolve(migrations, name), "utf8"));
   }
@@ -91,25 +101,40 @@ it("mints short-lived Realtime JWTs and isolates private topics", async () => {
   expect(Number(claims.exp) - Number(claims.iat)).toBe(900);
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
-    const allowed = await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`;
-    const peer = await tx`SELECT public.a2a_can_receive_realtime(${`agent:${second.id}`}) AS allowed`;
-    const foreign = await tx`SELECT public.a2a_can_receive_realtime(${`workspace:${betaId}`}) AS allowed`;
+    const allowed = await tx`SELECT a2a_private.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`;
+    const peer = await tx`SELECT a2a_private.a2a_can_receive_realtime(${`agent:${second.id}`}) AS allowed`;
+    const foreign = await tx`SELECT a2a_private.a2a_can_receive_realtime(${`workspace:${betaId}`}) AS allowed`;
     expect(allowed[0]?.allowed).toBe(true);
     expect(peer[0]?.allowed).toBe(false);
     expect(foreign[0]?.allowed).toBe(false);
   });
+  await sql`INSERT INTO realtime.messages DEFAULT VALUES`;
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+    await tx`SELECT set_config('realtime.topic', ${`agent:${first.id}`}, true)`;
+    await tx.unsafe("SET LOCAL ROLE authenticated");
+    expect((await tx`SELECT count(*)::int AS n FROM realtime.messages`)[0]?.n).toBe(1);
+    await tx`SELECT set_config('realtime.topic', ${`agent:${second.id}`}, true)`;
+    expect((await tx`SELECT count(*)::int AS n FROM realtime.messages`)[0]?.n).toBe(0);
+  });
   const human = await mintRealtimeToken(sql, { kind: "user", userId: ownerId, organizationId: alphaId });
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(decodeJwt(human.token))}, true)`;
-    expect((await tx`SELECT public.a2a_can_receive_realtime(${`workspace:${alphaId}`}) AS allowed`)[0]?.allowed).toBe(true);
-    expect((await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
+    expect((await tx`SELECT a2a_private.a2a_can_receive_realtime(${`workspace:${alphaId}`}) AS allowed`)[0]?.allowed).toBe(true);
+    expect((await tx`SELECT a2a_private.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
   });
   await revokeAgentTokenForHuman(sql, alphaId, ownerId, first.id, principal.tokenId!);
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
-    expect((await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
+    expect((await tx`SELECT a2a_private.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
   });
   await expect(mintRealtimeToken(sql, { kind: "agent", agent: principal })).rejects.toThrow("UNAUTHENTICATED");
+  const privileges = await sql`SELECT
+    has_function_privilege('anon', 'a2a_private.a2a_emit_realtime(text,text,uuid,uuid,uuid,uuid)', 'EXECUTE') AS anon_emit,
+    has_function_privilege('authenticated', 'a2a_private.a2a_emit_realtime(text,text,uuid,uuid,uuid,uuid)', 'EXECUTE') AS agent_emit`;
+  expect(privileges[0]?.anon_emit).toBe(false);
+  expect(privileges[0]?.agent_emit).toBe(false);
+  expect((await sql`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = 'realtime' AND tablename = 'messages' AND policyname = 'a2a_receive_private_topics'`)[0]?.n).toBe(1);
 });
 
 it("broadcasts identifiers only and keeps messages durable if Realtime fails", async () => {
@@ -136,7 +161,35 @@ it("broadcasts identifiers only and keeps messages durable if Realtime fails", a
   expect((await sql`SELECT body FROM messages WHERE id = ${durable.messageId}`)[0]?.body).toBe("Still durable");
   await sql.unsafe("DROP FUNCTION realtime.send(jsonb,text,text,boolean)");
   await sql.unsafe("DROP TABLE public.a2a_test_broadcasts");
-  await sql.unsafe("DROP SCHEMA realtime");
+});
+
+it("finds a notice whose transaction commits after a newer message", async () => {
+  const sender = await createAgent(sql, alphaId, ownerId, { handle: "commit-sender", hostType: "codex", role: "Sender", scopes: [] });
+  const reader = await createAgent(sql, alphaId, ownerId, { handle: "commit-reader", hostType: "claude-code", role: "Reader", scopes: [] });
+  const threadId = randomUUID();
+  const delayedId = randomUUID();
+  await sql`INSERT INTO threads (id, organization_id, kind) VALUES (${threadId}, ${alphaId}, 'direct')`;
+  let notifyInserted!: () => void;
+  let releaseDelayed!: () => void;
+  const inserted = new Promise<void>((resolve) => { notifyInserted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseDelayed = resolve; });
+  const delayed = sql.begin(async (tx) => {
+    await tx`INSERT INTO messages (id, organization_id, thread_id, sender_agent_id, client_message_id, type, priority, subject, body)
+      VALUES (${delayedId}, ${alphaId}, ${threadId}, ${sender.id}, ${randomUUID()}, 'blocker', 'high', 'Delayed commit', 'Must still notify')`;
+    await tx`INSERT INTO message_recipients (message_id, agent_id) VALUES (${delayedId}, ${reader.id})`;
+    notifyInserted();
+    await release;
+  });
+  await inserted;
+  const newer = await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
+    to: reader.handle, type: "fyi", subject: "Newer commit", body: "Committed first", clientMessageId: randomUUID(),
+  });
+  expect((await pendingAgentNotices(sql, { agentId: reader.id, organizationId: alphaId })).map((item) => item.id)).toContain(newer.messageId);
+  await acknowledgeAgentNotices(sql, { agentId: reader.id, organizationId: alphaId }, [newer.messageId]);
+  releaseDelayed();
+  await delayed;
+  const pending = await pendingAgentNotices(sql, { agentId: reader.id, organizationId: alphaId });
+  expect(pending.map((item) => item.id)).toEqual([delayedId]);
 });
 
 it("deduplicates a send and leaves group receipts independent", async () => {

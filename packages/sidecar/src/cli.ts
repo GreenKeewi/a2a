@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { rm } from "node:fs/promises";
+import { dirname } from "node:path";
 
-import { AgentApi, pairAgent } from "./api.js";
-import { findConfig, OsCredentialStore, saveConfig, userCachePath, type SidecarConfig } from "./config.js";
+import { AgentApi, ApiError, pairAgent } from "./api.js";
+import { findConfig, findHostIdentity, OsCredentialStore, saveConfig, saveHostIdentity, userCachePath,
+  type AgentConnection, type HostIdentity, type SidecarConfig } from "./config.js";
 import { RealtimeSession } from "./realtime.js";
 import { SyncEngine } from "./sync.js";
 
@@ -37,25 +39,43 @@ function argument(name: string) {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+function hostArgument(): HostIdentity["hostType"] {
+  const host = argument("--host");
+  if (host !== "claude-code" && host !== "codex") throw new Error("Specify --host claude-code or --host codex.");
+  return host;
+}
+
+async function currentConnection(): Promise<AgentConnection> {
+  const { path, config } = await findConfig();
+  return { ...config, ...await findHostIdentity(dirname(dirname(path)), hostArgument()) };
+}
+
 async function init() {
-  if (process.argv.includes("--code")) throw new Error("Enter the pairing code at the private prompt; command arguments are visible to other processes.");
+  if (process.argv.some((arg) => arg === "--code" || arg.startsWith("--code="))) throw new Error("Enter the pairing code at the private prompt; command arguments are visible to other processes.");
   const apiUrl = argument("--url");
-  if (!apiUrl) throw new Error("Usage: a2a init --url https://your-a2a-app.example");
+  const hostType = hostArgument();
+  if (!apiUrl) throw new Error("Usage: a2a init --host codex|claude-code --url https://your-a2a-app.example");
   const code = await readPairingCode();
   if (!code) throw new Error("A pairing code is required");
   const paired = await pairAgent(apiUrl, code);
   const config: SidecarConfig = {
     apiUrl: new URL(apiUrl).origin, realtimeUrl: paired.realtime.url, publishableKey: paired.realtime.publishableKey,
-    organizationId: paired.organizationId, agentId: paired.agentId,
+    organizationId: paired.organizationId,
   };
+  const connection = { ...config, hostType, agentId: paired.agentId };
+  if (paired.hostType !== hostType) {
+    await new AgentApi(connection, paired.token).revoke();
+    throw new Error("Pairing code belongs to a different host type. Use the matching agent.");
+  }
   const credentials = new OsCredentialStore();
-  await credentials.set(config, paired.token);
+  await credentials.set(connection, paired.token);
   await saveConfig(process.cwd(), config);
-  process.stdout.write(`Paired agent ${config.agentId}. Public project config saved in .a2a/config.json.\n`);
+  await saveHostIdentity(process.cwd(), { hostType, agentId: paired.agentId });
+  process.stdout.write(`Paired ${hostType} agent ${paired.agentId}. Public project config saved in .a2a/config.json.\n`);
 }
 
 async function status() {
-  const { config } = await findConfig();
+  const config = await currentConnection();
   const credentials = new OsCredentialStore();
   const token = await credentials.get(config);
   const api = new AgentApi(config, token);
@@ -65,17 +85,20 @@ async function status() {
 }
 
 async function logout() {
-  const { config } = await findConfig();
+  const config = await currentConnection();
   const credentials = new OsCredentialStore();
   const token = await credentials.get(config);
-  await new AgentApi(config, token).revoke();
+  let remoteError: unknown;
+  try { await new AgentApi(config, token).revoke(); }
+  catch (error) { remoteError = error; }
   await credentials.delete(config);
   await rm(userCachePath(config.agentId), { force: true });
+  if (remoteError && !(remoteError instanceof ApiError && remoteError.code === "UNAUTHENTICATED")) throw remoteError;
   process.stdout.write("Agent token revoked and local credential removed.\n");
 }
 
 async function daemon() {
-  const { config } = await findConfig();
+  const config = await currentConnection();
   const token = await new OsCredentialStore().get(config);
   const api = new AgentApi(config, token);
   const sync = new SyncEngine(api, userCachePath(config.agentId), (header) => {
@@ -94,7 +117,7 @@ async function main() {
   else if (command === "status") await status();
   else if (command === "logout") await logout();
   else if (command === "daemon") await daemon();
-  else process.stdout.write("Usage: a2a <init --url URL | status | logout | daemon>\n");
+  else process.stdout.write("Usage: a2a <init --host HOST --url URL | status --host HOST | logout --host HOST | daemon --host HOST>\n");
 }
 
 main().catch((error: unknown) => {

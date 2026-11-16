@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -15,9 +15,11 @@ export const configSchema = z.strictObject({
   realtimeUrl: safeUrl,
   publishableKey: z.string().min(1),
   organizationId: z.uuid(),
-  agentId: z.uuid(),
 });
 export type SidecarConfig = z.infer<typeof configSchema>;
+export const hostIdentitySchema = z.strictObject({ hostType: z.enum(["claude-code", "codex"]), agentId: z.uuid() });
+export type HostIdentity = z.infer<typeof hostIdentitySchema>;
+export type AgentConnection = SidecarConfig & HostIdentity;
 
 export function configPath(projectRoot: string) { return join(projectRoot, ".a2a", "config.json"); }
 
@@ -44,21 +46,46 @@ export async function saveConfig(projectRoot: string, value: SidecarConfig) {
   await rename(temporary, path);
 }
 
+function userConfigRoot() {
+  return platform() === "win32" ? process.env.APPDATA ?? join(homedir(), "AppData", "Roaming") :
+    platform() === "darwin" ? join(homedir(), "Library", "Application Support") : process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+}
+
+export function hostIdentityPath(projectRoot: string, hostType: HostIdentity["hostType"]) {
+  const root = resolve(projectRoot);
+  const fingerprint = createHash("sha256").update(platform() === "win32" ? root.toLowerCase() : root).digest("hex").slice(0, 24);
+  return join(userConfigRoot(), "a2a", "projects", fingerprint, `${hostType}.json`);
+}
+
+export async function saveHostIdentity(projectRoot: string, identity: HostIdentity) {
+  const parsed = hostIdentitySchema.parse(identity);
+  const path = hostIdentityPath(projectRoot, parsed.hostType);
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(parsed)}\n`, { mode: 0o600, flag: "wx" });
+  await rename(temporary, path);
+}
+
+export async function findHostIdentity(projectRoot: string, hostType: HostIdentity["hostType"]): Promise<HostIdentity> {
+  try { return hostIdentitySchema.parse(JSON.parse(await readFile(hostIdentityPath(projectRoot, hostType), "utf8"))); }
+  catch { throw new Error(`No ${hostType} identity found for this project. Run a2a init --host ${hostType}.`); }
+}
+
 export interface CredentialStore {
-  get(config: SidecarConfig): Promise<string>;
-  set(config: SidecarConfig, token: string): Promise<void>;
-  delete(config: SidecarConfig): Promise<void>;
+  get(config: AgentConnection): Promise<string>;
+  set(config: AgentConnection, token: string): Promise<void>;
+  delete(config: AgentConnection): Promise<void>;
 }
 
 export class OsCredentialStore implements CredentialStore {
-  private entry(config: SidecarConfig) { return new Entry("a2a-agent", `${new URL(config.apiUrl).origin}:${config.agentId}`); }
-  async get(config: SidecarConfig) {
+  private entry(config: AgentConnection) { return new Entry("a2a-agent", `${new URL(config.apiUrl).origin}:${config.agentId}`); }
+  async get(config: AgentConnection) {
     const token = this.entry(config).getPassword();
     if (!token) throw new Error("Agent credential is missing. Run a2a init again.");
     return token;
   }
-  async set(config: SidecarConfig, token: string) { this.entry(config).setPassword(token); }
-  async delete(config: SidecarConfig) { this.entry(config).deletePassword(); }
+  async set(config: AgentConnection, token: string) { this.entry(config).setPassword(token); }
+  async delete(config: AgentConnection) { this.entry(config).deletePassword(); }
 }
 
 export function userCachePath(agentId: string) {
