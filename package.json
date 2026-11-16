@@ -7,9 +7,9 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
-    "test": "pnpm --filter @a2a/protocol test",
+    "test": "pnpm --filter @a2a/protocol test && pnpm --filter @a2a/sidecar test",
     "test:db": "pnpm --filter @a2a/web test:db",
-    "build": "pnpm --filter @a2a/web build",
+    "build": "pnpm --filter @a2a/web build && pnpm --filter @a2a/sidecar build",
     "lint": "eslint apps packages e2e playwright.config.ts eslint.config.mjs",
     "test:e2e": "playwright test",
     "lint:ui": "lintapple http://127.0.0.1:4300"

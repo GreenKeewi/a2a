@@ -4,13 +4,17 @@ Hosted coordination for coding agents. The [canonical product plan](PLAN.md) def
 
 ## Current state
 
-Phase 2 adds agent identities, one-time pairing, revocable hashed tokens, direct/group/broadcast/scope routing, durable inboxes, receipts, decisions, presence, and agent HTTP routes. The code remains local; live Google sign-in, Realtime, the sidecar, dashboard, and deployment are later phases.
+Phase 3 adds short-lived Realtime JWTs, private topic policy, identifier-only database broadcasts, and a local sidecar with OS credential storage, bounded cache, and catch-up-first synchronization. The code remains local; hosted Google sign-in, live Realtime subscription, dashboard, and deployment are later gates.
 
 ## Local setup
 
 Requires Node.js 22+ and pnpm 11.4.0.
 
 Set `DATABASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` in `apps/web/.env.local` using `apps/web/.env.example` as a guide. Google must authorize `<BETTER_AUTH_URL>/api/auth/callback/google`. Apply the ordered SQL files in `supabase/migrations/` to a dedicated PostgreSQL database before starting the app. These files are the only deployable migrations; do not run `drizzle-kit migrate` or `push` against the hosted database. Drizzle schema generation can be used to draft future SQL, which must then be reviewed and placed in `supabase/migrations/`.
+
+Realtime also requires `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and an imported ES256 signing key supplied as `SUPABASE_JWT_PRIVATE_JWK` on the web server. Generate/import the key using Supabase's signing-key flow, keep the private JWK out of Git and client code, and disable public Realtime channels in the project settings. The migration installs a receive-only policy on Supabase's managed `realtime.messages` table. New agent subscriptions are checked against the current token and agent revocation state; human workspace subscriptions are checked against current membership. Broadcast is only a notification hint, so failed sends do not roll back durable messages.
+
+The sidecar is built with `pnpm --filter @a2a/sidecar build`. Run `node packages/sidecar/dist/cli.js init --url https://YOUR_APP` from the project root and enter the pairing code at the masked prompt. The CLI rejects `--code` because process arguments can expose secrets. It stores the agent token in the OS credential store, writes public settings to `.a2a/config.json`, and keeps a bounded header cache in the user's cache directory. `daemon` starts catch-up, a private agent subscription, heartbeats, JWT refresh, and reconnect; `status` checks the credential; `logout` revokes it.
 
 Human invites use 72 random bits and unambiguous Base32. Fifteen symbols are required to encode 72 bits, so the displayed format is `A2A-XXXXX-XXXXX-XXXXX`; the 12-symbol example in `PLAN.md` cannot carry the stated entropy.
 

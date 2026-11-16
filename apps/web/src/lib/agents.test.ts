@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import postgres from "postgres";
+import { decodeJwt, exportJWK, generateKeyPair, jwtVerify } from "jose";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
   getAgentBriefing, heartbeatAgent, listAgentInbox, listAgentTokensForHuman, listAgents, readAgentMessage, readAgentThread,
   resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage,
 } from "./agents";
+import { mintRealtimeToken } from "./realtime";
 
 const adminUrl = process.env.TEST_DATABASE_URL;
 if (!adminUrl || !["localhost", "127.0.0.1"].includes(new URL(adminUrl).hostname)) {
@@ -31,6 +33,11 @@ beforeAll(async () => {
   process.env.BETTER_AUTH_SECRET = "local-testing-secret-with-32-plus-characters";
   process.env.GOOGLE_CLIENT_ID = "local-placeholder";
   process.env.GOOGLE_CLIENT_SECRET = "local-placeholder";
+  const keys = await generateKeyPair("ES256", { extractable: true });
+  const privateJwk = await exportJWK(keys.privateKey);
+  process.env.SUPABASE_JWT_PRIVATE_JWK = JSON.stringify({ ...privateJwk, kid: "a2a-local-test" });
+  process.env.SUPABASE_URL = "http://127.0.0.1:54321";
+  process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_local_test";
   await admin.unsafe(`CREATE DATABASE "${databaseName}"`);
   for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort()) {
     await sql.unsafe(await readFile(resolve(migrations, name), "utf8"));
@@ -67,6 +74,69 @@ it("exchanges a pairing code once and revokes its token immediately", async () =
   const nextPrincipal = await authenticateAgentToken(sql, nextPair.token);
   await revokeAgentToken(sql, nextPrincipal);
   await expect(authenticateAgentToken(sql, nextPair.token)).rejects.toThrow("UNAUTHENTICATED");
+});
+
+it("mints short-lived Realtime JWTs and isolates private topics", async () => {
+  const first = await createAgent(sql, alphaId, ownerId, { handle: "rt-first", hostType: "codex", role: "Realtime", scopes: [] });
+  const second = await createAgent(sql, alphaId, ownerId, { handle: "rt-second", hostType: "claude-code", role: "Realtime", scopes: [] });
+  const { token } = await exchangePairingCode(sql, await createPairingCode(sql, alphaId, first.id, ownerId));
+  const principal = await authenticateAgentToken(sql, token);
+  const signed = await mintRealtimeToken(sql, { kind: "agent", agent: principal });
+  const claims = decodeJwt(signed.token);
+  const publicJwk = JSON.parse(process.env.SUPABASE_JWT_PRIVATE_JWK!) as Record<string, unknown>;
+  delete publicJwk.d;
+  const { importJWK } = await import("jose");
+  await jwtVerify(signed.token, await importJWK(publicJwk, "ES256"), { audience: "authenticated" });
+  expect(signed.expiresIn).toBe(900);
+  expect(Number(claims.exp) - Number(claims.iat)).toBe(900);
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+    const allowed = await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`;
+    const peer = await tx`SELECT public.a2a_can_receive_realtime(${`agent:${second.id}`}) AS allowed`;
+    const foreign = await tx`SELECT public.a2a_can_receive_realtime(${`workspace:${betaId}`}) AS allowed`;
+    expect(allowed[0]?.allowed).toBe(true);
+    expect(peer[0]?.allowed).toBe(false);
+    expect(foreign[0]?.allowed).toBe(false);
+  });
+  const human = await mintRealtimeToken(sql, { kind: "user", userId: ownerId, organizationId: alphaId });
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(decodeJwt(human.token))}, true)`;
+    expect((await tx`SELECT public.a2a_can_receive_realtime(${`workspace:${alphaId}`}) AS allowed`)[0]?.allowed).toBe(true);
+    expect((await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
+  });
+  await revokeAgentTokenForHuman(sql, alphaId, ownerId, first.id, principal.tokenId!);
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+    expect((await tx`SELECT public.a2a_can_receive_realtime(${`agent:${first.id}`}) AS allowed`)[0]?.allowed).toBe(false);
+  });
+  await expect(mintRealtimeToken(sql, { kind: "agent", agent: principal })).rejects.toThrow("UNAUTHENTICATED");
+});
+
+it("broadcasts identifiers only and keeps messages durable if Realtime fails", async () => {
+  await sql.unsafe("CREATE SCHEMA IF NOT EXISTS realtime");
+  await sql.unsafe("CREATE TABLE IF NOT EXISTS public.a2a_test_broadcasts (payload jsonb NOT NULL, event text NOT NULL, topic text NOT NULL, private boolean NOT NULL)");
+  await sql.unsafe(`CREATE OR REPLACE FUNCTION realtime.send(payload jsonb, event text, topic text, private boolean) RETURNS void
+    LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.a2a_test_broadcasts VALUES (payload, event, topic, private); END $$`);
+  const sender = await createAgent(sql, alphaId, ownerId, { handle: "broadcast-sender", hostType: "codex", role: "Sender", scopes: [] });
+  const reader = await createAgent(sql, alphaId, ownerId, { handle: "broadcast-reader", hostType: "claude-code", role: "Reader", scopes: [] });
+  const sent = await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
+    to: reader.handle, type: "fyi", subject: "Secret subject", body: "Sensitive body never in events", clientMessageId: randomUUID(),
+  });
+  const events = await sql`SELECT payload, event, topic, private FROM public.a2a_test_broadcasts WHERE payload->>'messageId' = ${sent.messageId}`;
+  expect(events).toHaveLength(2);
+  expect(events.every((event) => event.private === true)).toBe(true);
+  expect(events.some((event) => event.topic === `agent:${reader.id}`)).toBe(true);
+  expect(JSON.stringify(events)).not.toContain("Sensitive body");
+  expect(JSON.stringify(events)).not.toContain("Secret subject");
+  await sql.unsafe(`CREATE OR REPLACE FUNCTION realtime.send(payload jsonb, event text, topic text, private boolean) RETURNS void
+    LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'partition unavailable'; END $$`);
+  const durable = await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
+    to: reader.handle, type: "fyi", subject: "Offline send", body: "Still durable", clientMessageId: randomUUID(),
+  });
+  expect((await sql`SELECT body FROM messages WHERE id = ${durable.messageId}`)[0]?.body).toBe("Still durable");
+  await sql.unsafe("DROP FUNCTION realtime.send(jsonb,text,text,boolean)");
+  await sql.unsafe("DROP TABLE public.a2a_test_broadcasts");
+  await sql.unsafe("DROP SCHEMA realtime");
 });
 
 it("deduplicates a send and leaves group receipts independent", async () => {

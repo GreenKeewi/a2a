@@ -37,7 +37,7 @@ export async function jsonBody<T extends z.ZodType>(request: Request, schema: T)
 export async function respond(handler: () => Promise<unknown>) {
   const requestId = randomUUID();
   try {
-    return Response.json({ data: await handler(), error: null, requestId });
+    return Response.json({ data: await handler(), error: null, requestId }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const databaseCode = typeof error === "object" && error && "code" in error ? error.code : null;
     const authMessage = typeof error === "object" && error && "body" in error &&
@@ -49,6 +49,6 @@ export async function respond(handler: () => Promise<unknown>) {
     const status = apiCode === "UNAUTHENTICATED" ? 401 : apiCode === "FORBIDDEN" ? 403 : apiCode === "CONFLICT" ? 409 :
       apiCode === "NOT_FOUND" ? 404 : apiCode === "INVALID_REQUEST" ? 400 : 500;
     if (status === 500) console.error("a2a request failed", { requestId, errorCode: typeof databaseCode === "string" ? databaseCode : "unknown" });
-    return Response.json({ data: null, error: { code: apiCode, message: apiCode }, requestId }, { status });
+    return Response.json({ data: null, error: { code: apiCode, message: apiCode }, requestId }, { status, headers: { "cache-control": "no-store" } });
   }
 }
