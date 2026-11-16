@@ -18,7 +18,7 @@ async function mockDashboard(page: Page, populated = true) {
 test("dashboard routes render populated and empty states", async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await mockDashboard(page);
-  for (const [path, heading] of [["", "Overview"], ["context", "Context"], ["agents", "Agents"], ["settings", "Settings"]]) {
+  for (const [path, heading] of [["", "Overview"], ["context", "Context"], ["agents", "Agents"], ["settings", "Settings"]] as const) {
     await page.goto(`/w/demo/${path}`);
     await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
     if (path === "") await page.screenshot({ path: testInfo.outputPath("overview.png"), fullPage: true });
@@ -64,6 +64,43 @@ test("inbox catches up without a page refresh and exposes failures", async ({ pa
   await expectUI(page, testInfo);
 });
 
+test("Realtime broadcast updates the inbox and thread navigation keeps one connection", async ({ page }) => {
+  test.setTimeout(60_000);
+  let newMessage = false;
+  let tokenPosts = 0;
+  let joinedToken = "";
+  let socket: { send(message: string): void } | null = null;
+  await mockDashboard(page, false);
+  await page.route("**/api/workspaces/demo/inbox", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: newMessage ? inbox : [], error: null }) }));
+  await page.route("**/api/workspaces/demo/agents", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: agents, error: null }) }));
+  await page.route("**/api/workspaces/demo/realtime-token", (route) => {
+    tokenPosts++;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: { token: "app.minted.jwt", url: "http://127.0.0.1:54321", publishableKey: "sb_publishable_test" }, error: null }) });
+  });
+  await page.routeWebSocket("**/realtime/v1/websocket**", (ws) => {
+    socket = ws;
+    ws.onMessage((raw) => {
+      if (typeof raw !== "string") return;
+      const [joinRef, ref, topic, event, payload] = JSON.parse(raw) as [string | null, string | null, string, string, { access_token?: string }];
+      if (event === "phx_join") {
+        joinedToken = payload.access_token ?? "";
+        ws.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response: {} }]));
+      }
+    });
+  });
+  await page.goto("/w/demo/inbox");
+  await expect.poll(() => joinedToken).toBe("app.minted.jwt");
+  const initialTokenPosts = tokenPosts;
+  newMessage = true;
+  expect(socket).not.toBeNull();
+  socket!.send(JSON.stringify([null, null, `realtime:workspace:${workspace.organizationId}`, "broadcast", { event: "message.created", payload: {} }]));
+  await expect(page.getByRole("button", { name: /Schema handoff/ })).toBeVisible();
+  await page.getByRole("button", { name: /Schema handoff/ }).click();
+  await expect(page.getByText("Please review the schema.", { exact: true })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(tokenPosts).toBe(initialTokenPosts);
+});
+
 test("agent dialogs and keyboard focus run the owner controls", async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await mockDashboard(page);
@@ -72,8 +109,11 @@ test("agent dialogs and keyboard focus run the owner controls", async ({ page },
   await page.route("**/api/workspaces/demo/agents/*", (route) => {
     if (route.request().method() === "PATCH") edits.push(route.request().postDataJSON().scopes);
     if (route.request().method() === "DELETE") revokes++;
-    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: {}, error: null }) });
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: route.request().method() === "PATCH" ? { overlapWarnings: ["claude-ui"] } : {}, error: null }) });
   });
+  await page.route("**/api/workspaces/demo/agents", (route) => route.request().method() === "POST"
+    ? route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: { overlapWarnings: ["codex-api"] }, error: null }) })
+    : route.fallback());
   await page.goto("/w/demo/agents");
   const edit = page.getByRole("button", { name: "Edit scopes" });
   await edit.focus();
@@ -82,6 +122,11 @@ test("agent dialogs and keyboard focus run the owner controls", async ({ page },
   await page.keyboard.press("Enter");
   await expect.poll(() => edits.length).toBe(1);
   expect(edits[0]).toEqual(["apps/api/**", "apps/web/**"]);
+  await expect(page.getByRole("status").filter({ hasText: "Overlapping scopes with claude-ui." })).toBeVisible();
+  await page.getByRole("textbox", { name: "Handle" }).fill("new-agent");
+  await page.getByRole("textbox", { name: "Role" }).fill("Reviewer");
+  await page.getByRole("button", { name: /Add agent/ }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Overlapping scopes with codex-api." })).toBeVisible();
   page.once("dialog", async (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Revoke", exact: true }).click();
   await expect.poll(() => revokes).toBe(1);
@@ -102,6 +147,26 @@ test("a person can reply to every agent already in a group thread", async ({ pag
   const sent = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/demo/messages") && request.method() === "POST");
   await page.getByRole("button", { name: /Send message/ }).click();
   expect((await sent).postDataJSON()).toMatchObject({ to: ["codex-api", "claude-ui"] });
+});
+
+test("keyboard opens a thread and reaches the composer in order", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/w/demo/inbox");
+  const row = page.getByRole("button", { name: /Schema handoff/ }).first();
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Please review the schema.", { exact: true })).toBeVisible();
+  const sendTo = page.getByLabel("Send to");
+  for (let step = 0; step < 4 && !(await sendTo.evaluate((element) => document.activeElement === element)); step++) {
+    await page.keyboard.press("Tab");
+  }
+  await expect(sendTo).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Type")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Subject")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Message")).toBeFocused();
 });
 
 test("human controls send, pair, invite, and save context", async ({ page }) => {

@@ -448,13 +448,15 @@ export async function readAgentMessage(sql: Sql, principal: AgentPrincipal, mess
     UPDATE message_recipients r SET read_at = coalesce(r.read_at, now()), delivered_at = coalesce(r.delivered_at, now())
     FROM messages m WHERE r.message_id = m.id AND m.id = ${messageId}
       AND m.organization_id = ${principal.organizationId} AND r.agent_id = ${principal.agentId}
-    RETURNING m.id, m.thread_id, m.type, m.priority, m.subject, m.body, m.parts, m.created_at, m.sender_user_id
+    RETURNING m.id, m.thread_id, m.type, m.priority, m.subject, m.body, m.parts, m.created_at, m.sender_user_id, m.sender_agent_id
   `;
   const row = rows[0];
   if (!row) throw new AgentError("NOT_FOUND");
+  const sender = row.sender_agent_id ? await sql`SELECT handle FROM agents WHERE id = ${row.sender_agent_id}` : [];
   return { id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
     subject: String(row.subject), body: String(row.body), parts: row.parts,
-    senderHandle: row.sender_user_id ? "human" : null, createdAt: (row.created_at as Date).toISOString() };
+    senderHandle: row.sender_user_id ? "human" : sender[0] ? String(sender[0].handle) : null,
+    createdAt: (row.created_at as Date).toISOString() };
 }
 
 export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threadId: string) {
