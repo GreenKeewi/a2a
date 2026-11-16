@@ -239,6 +239,11 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   expect(task.contextId).toBeTruthy();
   const duplicate = await rpc("SendMessage", request);
   expect(duplicate.body.result.task.id).toBe(task.id);
+  const concurrentRequest = { message: { ...request.message, messageId: "concurrent-message",
+    metadata: { subject: "Concurrent schema review", type: "question" } } };
+  const concurrent = await Promise.all([rpc("SendMessage", concurrentRequest), rpc("SendMessage", concurrentRequest)]);
+  expect(concurrent.map((result) => result.body.result?.task.id)).toEqual([concurrent[0]!.body.result.task.id,
+    concurrent[0]!.body.result.task.id]);
   const source = await sql`SELECT id, thread_id, body FROM messages WHERE organization_id = ${workspaceId}
     AND sender_agent_id = ${sender.id} AND subject = 'Schema review'`;
   expect(source).toHaveLength(1);

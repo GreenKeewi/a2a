@@ -249,18 +249,27 @@ export class A2ABridgeHandler implements A2ARequestHandler {
       return this.materialize(await waitForAgentReply(() => this.taskRow(existingTaskId),
         params.configuration?.returnImmediately), params.configuration?.historyLength);
     }
-    const sent = await submit(this.sql);
-    const taskId = randomUUID();
-    await this.sql`INSERT INTO a2a_tasks
-      (id, organization_id, client_agent_id, target_agent_id, context_id, thread_id, initial_message_id)
-      VALUES (${taskId}, ${this.principal.organizationId}, ${this.principal.agentId}, ${target.id},
-        ${contextId}, ${sent.threadId}, ${sent.messageId}) ON CONFLICT (initial_message_id) DO NOTHING`;
-    const task = await this.sql`SELECT id, target_agent_id FROM a2a_tasks WHERE initial_message_id = ${sent.messageId}
-      AND organization_id = ${this.principal.organizationId} AND client_agent_id = ${this.principal.agentId}`;
-    if (!task[0] || String(task[0].target_agent_id) !== target.id) throw new RequestMalformedError();
-    const persistedTaskId = String(task[0].id);
-    await this.sql`INSERT INTO a2a_task_messages (task_id, message_id, external_message_id)
-      VALUES (${persistedTaskId}, ${sent.messageId}, ${message.messageId}) ON CONFLICT (message_id) DO NOTHING`;
+    const persistedTaskId = await this.sql.begin(async (tx) => {
+      const sent = await submit(tx as unknown as Sql, true);
+      const stored = await tx`SELECT body, subject FROM messages WHERE id = ${sent.messageId}
+        AND organization_id = ${this.principal.organizationId} AND sender_agent_id = ${this.principal.agentId}`;
+      if (!stored[0] || String(stored[0].body) !== body || String(stored[0].subject) !== subject) {
+        throw new RequestMalformedError();
+      }
+      const taskId = randomUUID();
+      await tx`INSERT INTO a2a_tasks
+        (id, organization_id, client_agent_id, target_agent_id, context_id, thread_id, initial_message_id)
+        VALUES (${taskId}, ${this.principal.organizationId}, ${this.principal.agentId}, ${target.id},
+          ${contextId}, ${sent.threadId}, ${sent.messageId}) ON CONFLICT (initial_message_id) DO NOTHING`;
+      const task = await tx`SELECT id, target_agent_id, context_id FROM a2a_tasks WHERE initial_message_id = ${sent.messageId}
+        AND organization_id = ${this.principal.organizationId} AND client_agent_id = ${this.principal.agentId}`;
+      if (!task[0] || String(task[0].target_agent_id) !== target.id ||
+          (message.contextId && String(task[0].context_id) !== message.contextId)) throw new RequestMalformedError();
+      const boundTaskId = String(task[0].id);
+      await tx`INSERT INTO a2a_task_messages (task_id, message_id, external_message_id)
+        VALUES (${boundTaskId}, ${sent.messageId}, ${message.messageId}) ON CONFLICT (message_id) DO NOTHING`;
+      return boundTaskId;
+    });
     return this.materialize(await waitForAgentReply(() => this.taskRow(persistedTaskId),
       params.configuration?.returnImmediately), params.configuration?.historyLength);
   }
