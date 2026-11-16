@@ -78,7 +78,7 @@ export async function createPairingCode(sql: Sql, organizationId: string, agentI
       JOIN member m ON m.organization_id = a.organization_id
       WHERE a.id = ${agentId} AND a.organization_id = ${organizationId} AND a.revoked_at IS NULL AND m.user_id = ${userId}
         AND (a.created_by_user_id = ${userId} OR m.role = 'owner')
-      FOR UPDATE OF a
+      FOR UPDATE OF a FOR SHARE OF m
     `;
     if (!rows[0]) throw new AgentError("FORBIDDEN");
     await tx`UPDATE agent_pairing_codes SET expires_at = now() WHERE agent_id = ${agentId} AND used_at IS NULL AND expires_at > now()`;
@@ -99,11 +99,10 @@ export async function exchangePairingCode(sql: Sql, input: string) {
     const rows = await tx`
       SELECT p.id, p.code_hash, p.agent_id, p.expires_at, p.used_at, a.organization_id, a.revoked_at
       FROM agent_pairing_codes p JOIN agents a ON a.id = p.agent_id
-      WHERE p.code_hash = ${codeHash} FOR UPDATE OF p
+      WHERE p.code_hash = ${codeHash} AND p.used_at IS NULL AND p.expires_at > now() AND a.revoked_at IS NULL FOR UPDATE OF p
     `;
     const row = rows[0];
-    if (!row || !timingSafeEqual(Buffer.from(String(row.code_hash), "hex"), Buffer.from(codeHash, "hex")) ||
-        row.used_at || row.revoked_at || new Date(String(row.expires_at)).getTime() <= Date.now()) {
+    if (!row || !timingSafeEqual(Buffer.from(String(row.code_hash), "hex"), Buffer.from(codeHash, "hex"))) {
       throw new AgentError("INVALID_PAIRING_CODE");
     }
     await tx`UPDATE agent_pairing_codes SET used_at = now() WHERE id = ${row.id} AND used_at IS NULL`;
@@ -265,6 +264,13 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
         if (threadId && threadId !== String(original.thread_id)) throw new AgentError("INVALID_REQUEST");
         threadId = String(original.thread_id);
       }
+      if (threadId) {
+        const thread = await tx`
+          SELECT t.id FROM threads t JOIN thread_agent_members tm ON tm.thread_id = t.id
+          WHERE t.id = ${threadId} AND t.organization_id = ${principal.organizationId} AND tm.agent_id = ${principal.agentId}
+        `;
+        if (!thread.length) throw new AgentError("NOT_FOUND");
+      }
       let routingAgents = allAgents;
       if (threadId && targets.includes("*")) {
         const members = await tx`SELECT agent_id FROM thread_agent_members WHERE thread_id = ${threadId}`;
@@ -273,11 +279,6 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
       }
       const recipients = resolveRecipients(routingAgents, principal.agentId, targets);
       if (threadId) {
-        const thread = await tx`
-          SELECT t.id FROM threads t JOIN thread_agent_members tm ON tm.thread_id = t.id
-          WHERE t.id = ${threadId} AND t.organization_id = ${principal.organizationId} AND tm.agent_id = ${principal.agentId}
-        `;
-        if (!thread.length) throw new AgentError("NOT_FOUND");
         const members = await tx`SELECT agent_id FROM thread_agent_members WHERE thread_id = ${threadId}`;
         if (recipients.some((recipient) => !members.some((member) => member.agent_id === recipient.id))) throw new AgentError("INVALID_ROUTE");
       } else {

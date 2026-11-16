@@ -104,8 +104,9 @@ it("deduplicates a send and leaves group receipts independent", async () => {
   expect(receipts.find((row) => row.agent_id === a.id)?.read_at).not.toBeNull();
   expect(receipts.find((row) => row.agent_id === b.id)?.read_at).toBeNull();
   const privateReply = await sendAgentMessage(sql, { agentId: sender.id, organizationId: alphaId }, {
-    to: "codex-db", type: "fyi", subject: "Only DB", body: "Private details", threadId: first.threadId, replyTo: first.messageId, clientMessageId: randomUUID(),
+    to: "codex-db", type: "fyi", subject: "Only DB", body: "Private details", replyTo: first.messageId, clientMessageId: randomUUID(),
   });
+  expect(privateReply.threadId).toBe(first.threadId);
   expect((await readAgentThread(sql, { agentId: a.id, organizationId: alphaId }, first.threadId)).messages.some((message) => message.id === privateReply.messageId)).toBe(true);
   expect((await readAgentThread(sql, { agentId: b.id, organizationId: alphaId }, first.threadId)).messages.some((message) => message.id === privateReply.messageId)).toBe(false);
   await expect(readAgentMessage(sql, { agentId: b.id, organizationId: alphaId }, privateReply.messageId)).rejects.toThrow("NOT_FOUND");
@@ -187,6 +188,12 @@ it("rejects cross-workspace IDs and routes to the most specific active scope own
   const broadcastReceipts = await sql`SELECT agent_id, read_at FROM message_recipients WHERE message_id = ${routed.messageId}`;
   expect(broadcastReceipts.find((row) => row.agent_id === broad.id)?.read_at).not.toBeNull();
   expect(broadcastReceipts.find((row) => row.agent_id === specific.id)?.read_at).toBeNull();
+  const late = await createAgent(sql, betaId, ownerId, { handle: "beta-late", hostType: "codex", role: "Late", scopes: [] });
+  const followup = await sendAgentMessage(sql, { agentId: sender.id, organizationId: betaId }, {
+    to: "*", type: "fyi", subject: "Original members", body: "Only participants", threadId: routed.threadId, clientMessageId: randomUUID(),
+  });
+  expect(followup.recipientHandles).not.toContain(late.handle);
+  await expect(readAgentMessage(sql, { agentId: late.id, organizationId: betaId }, followup.messageId)).rejects.toThrow("NOT_FOUND");
   const tie = await createAgent(sql, betaId, ownerId, { handle: "beta-page-peer", hostType: "codex", role: "Page peer", scopes: ["apps/web/src/**"] });
   await expect(sendAgentMessage(sql, { agentId: sender.id, organizationId: betaId }, {
     to: "owner:apps/web/src/page.tsx", type: "fyi", subject: "Ambiguous", body: "No route", clientMessageId: randomUUID(),
