@@ -31,11 +31,16 @@ export async function respond(handler: () => Promise<unknown>) {
   try {
     return Response.json({ data: await handler(), error: null, requestId });
   } catch (error) {
-    const code = error instanceof WorkspaceError ? error.code : "INTERNAL_ERROR";
+    const databaseCode = typeof error === "object" && error && "code" in error ? error.code : null;
+    const authMessage = typeof error === "object" && error && "body" in error &&
+      typeof error.body === "object" && error.body && "message" in error.body ? error.body.message : null;
+    const code = error instanceof WorkspaceError ? error.code :
+      databaseCode === "23505" || authMessage === "Organization already exists" ? "CONFLICT" : "INTERNAL_ERROR";
     const apiCode = code === "ALREADY_MEMBER" ? "CONFLICT" :
       code === "INVALID_INVITE" || code === "INVALID_BRIEF" ? "INVALID_REQUEST" : code;
     const status = apiCode === "UNAUTHENTICATED" ? 401 : apiCode === "FORBIDDEN" ? 403 : apiCode === "CONFLICT" ? 409 :
       apiCode === "INVALID_REQUEST" ? 400 : 500;
+    if (status === 500) console.error("a2a request failed", { requestId, errorCode: typeof databaseCode === "string" ? databaseCode : "unknown" });
     return Response.json({ data: null, error: { code: apiCode, message: apiCode }, requestId }, { status });
   }
 }

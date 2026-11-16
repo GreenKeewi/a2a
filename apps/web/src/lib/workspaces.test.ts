@@ -47,7 +47,12 @@ async function seedWorkspace(id: string, slug: string, creatorId: string) {
 }
 
 beforeAll(async () => {
+  await admin.unsafe(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+  END $$`);
   await admin.unsafe(`CREATE DATABASE "${databaseName}"`);
+  await sql.unsafe("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated");
   await migrate();
   await Promise.all([seedUser(ownerId), seedUser(inviteeAId), seedUser(inviteeBId), seedUser(removedId)]);
   await seedWorkspace(alphaId, "alpha", ownerId);
@@ -73,10 +78,28 @@ describe("workspace access", () => {
     });
     expect(created).not.toBeNull();
     expect((await readWorkspace(sql, created!.id, ownerId)).displayName).toBe("Plugin Workspace");
-  });
+    const audit = await sql`SELECT action FROM audit_events WHERE organization_id = ${created!.id} ORDER BY created_at`;
+    expect(audit.map((row) => row.action)).toContain("workspace.created");
+    const route = await import("../app/api/auth/[...all]/route");
+    for (const path of ["invite-member", "accept-invitation", "update-member-role", "delete", "create"]) {
+      const request = new Request(`http://127.0.0.1:4300/api/auth/organization/${path}`, { method: "POST" });
+      expect((await route.POST(request)).status).toBe(404);
+    }
+    expect((await route.GET(new Request("http://127.0.0.1:4300/api/auth/organization/list"))).status).toBe(404);
+    expect((await route.POST(new Request("http://127.0.0.1:4300/api/auth/organization%2Finvite-member", { method: "POST" }))).status).toBe(404);
+    expect((await route.GET(new Request("http://127.0.0.1:4300/api/auth/get-session"))).status).toBe(200);
+    const { createWorkspaceSchema } = await import("./workspace-inputs");
+    expect(createWorkspaceSchema.safeParse({ name: "Reserved", slug: "join" }).success).toBe(false);
+    const { respond } = await import("./http");
+    const duplicate = await respond(() => auth.api.createOrganization({
+      body: { name: "Duplicate", slug: "plugin-workspace", userId: ownerId },
+    }));
+    expect(duplicate.status).toBe(409);
+  }, 20_000);
 
   it("lets exactly one concurrent claimant use the final invite", async () => {
     const code = await createInviteCode(sql, alphaId, ownerId, { maxUses: 1, expiresInHours: 24 });
+    expect(code).toMatch(/^A2A-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$/);
     const [a, b] = await Promise.allSettled([
       redeemInviteCode(sql, code, inviteeAId),
       redeemInviteCode(sql, code, inviteeBId),
@@ -86,11 +109,37 @@ describe("workspace access", () => {
     expect(rows[0]?.use_count).toBe(1);
   });
 
+  it("defaults invite codes to five uses and 24 hours", async () => {
+    const code = await createInviteCode(sql, alphaId, ownerId);
+    const rows = await sql`
+      SELECT maximum_uses, extract(epoch from (expires_at - created_at)) / 3600 AS hours
+      FROM workspace_invite_codes WHERE code_hash = encode(sha256(${code}::bytea), 'hex')
+    `;
+    expect(rows[0]?.maximum_uses).toBe(5);
+    expect(Number(rows[0]?.hours)).toBeCloseTo(24, 1);
+  });
+
+  it("returns an HTTP conflict when the same user races two valid invites", async () => {
+    const [first, second] = await Promise.all([
+      createInviteCode(sql, alphaId, ownerId),
+      createInviteCode(sql, alphaId, ownerId),
+    ]);
+    const { respond } = await import("./http");
+    const responses = await Promise.all([
+      respond(() => redeemInviteCode(sql, first, removedId)),
+      respond(() => redeemInviteCode(sql, second, removedId)),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    await sql`DELETE FROM member WHERE organization_id = ${alphaId} AND user_id = ${removedId}`;
+  });
+
   it("checks current membership on every read and write", async () => {
     await expect(readWorkspace(sql, alphaId, removedId)).rejects.toThrow("FORBIDDEN");
     await expect(updateProjectBrief(sql, alphaId, removedId, "No access")).rejects.toThrow("FORBIDDEN");
     await sql`INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES (${randomUUID()}, ${alphaId}, ${removedId}, 'member', now())`;
     expect((await readWorkspace(sql, alphaId, removedId)).organizationId).toBe(alphaId);
+    await expect(createInviteCode(sql, alphaId, removedId)).rejects.toThrow("FORBIDDEN");
+    await expect(updateProjectBrief(sql, alphaId, removedId, "Not an owner")).rejects.toThrow("FORBIDDEN");
     await sql`DELETE FROM member WHERE organization_id = ${alphaId} AND user_id = ${removedId}`;
     await expect(readWorkspace(sql, alphaId, removedId)).rejects.toThrow("FORBIDDEN");
     await expect(readWorkspace(sql, betaId, ownerId)).rejects.toThrow("FORBIDDEN");
@@ -113,6 +162,7 @@ it("upgrades a populated initial schema without losing an existing organization"
   url.pathname = `/${upgradeName}`;
   const upgradeSql = postgres(url.toString(), { max: 2, prepare: false });
   try {
+    await upgradeSql.unsafe("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated");
     await upgradeSql.unsafe(await readFile(resolve(migrationDirectory, "202611150001_initial_schema.sql"), "utf8"));
     const userId = randomUUID();
     const organizationId = randomUUID();
@@ -121,8 +171,22 @@ it("upgrades a populated initial schema without losing an existing organization"
     await upgradeSql`INSERT INTO member (id, user_id, organization_id, role, created_at) VALUES (${randomUUID()}, ${userId}, ${organizationId}, 'owner', now())`;
     await upgradeSql.unsafe(await readFile(resolve(migrationDirectory, "202611150002_access_and_search.sql"), "utf8"));
     expect((await readWorkspace(upgradeSql, organizationId, userId)).displayName).toBe("Existing");
-    const policy = await upgradeSql`SELECT relrowsecurity FROM pg_class WHERE oid = 'public.workspace_settings'::regclass`;
-    expect(policy[0]?.relrowsecurity).toBe(true);
+    const policy = await upgradeSql`
+      SELECT c.relname, c.relrowsecurity,
+             has_table_privilege('anon', c.oid, 'SELECT') AS anon_read,
+             has_table_privilege('authenticated', c.oid, 'SELECT') AS authenticated_read
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'r'
+    `;
+    expect(policy).toHaveLength(20);
+    expect(policy.every((row) => row.relrowsecurity && !row.anon_read && !row.authenticated_read)).toBe(true);
+    await upgradeSql.unsafe("CREATE TABLE default_grant_probe (id integer)");
+    const defaults = await upgradeSql`
+      SELECT has_table_privilege('anon', 'default_grant_probe', 'SELECT') AS anon_read,
+             has_table_privilege('authenticated', 'default_grant_probe', 'SELECT') AS authenticated_read
+    `;
+    expect(defaults[0]?.anon_read).toBe(false);
+    expect(defaults[0]?.authenticated_read).toBe(false);
   } finally {
     await upgradeSql.end();
     await admin.unsafe(`DROP DATABASE IF EXISTS "${upgradeName}" WITH (FORCE)`);

@@ -24,6 +24,7 @@ export const auth = betterAuth({
   secret: required("BETTER_AUTH_SECRET", 32),
   database: drizzleAdapter(db, { provider: "pg", schema: authSchema }),
   advanced: { database: { generateId: "uuid" } },
+  account: { accountLinking: { enabled: false }, encryptOAuthTokens: true },
   emailAndPassword: { enabled: false },
   socialProviders: {
     google: {
@@ -31,5 +32,5 @@ export const auth = betterAuth({
       clientSecret: required("GOOGLE_CLIENT_SECRET"),
     },
   },
-  plugins: [organization(), nextCookies()],
+  plugins: [organization({ disableOrganizationDeletion: true }), nextCookies()],
 });

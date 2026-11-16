@@ -6,8 +6,8 @@ import { createInviteCode, resolveWorkspaceId, revokeInviteCode } from "@/lib/wo
 
 type Context = { params: Promise<{ slug: string }> };
 const createSchema = z.strictObject({
-  maxUses: z.number().int().min(1).max(100),
-  expiresInHours: z.number().int().min(1).max(168),
+  maxUses: z.number().int().min(1).max(100).default(5),
+  expiresInHours: z.number().int().min(1).max(168).default(24),
 });
 const revokeSchema = z.strictObject({ inviteId: z.uuid() });
 
@@ -16,7 +16,7 @@ export async function GET(request: Request, { params }: Context) {
     const userId = await requireHuman(request);
     const organizationId = await resolveWorkspaceId(sql, (await params).slug, userId);
     const members = await sql`SELECT role FROM member WHERE organization_id = ${organizationId} AND user_id = ${userId}`;
-    if (!members[0] || !["owner", "admin"].includes(String(members[0].role))) return [];
+    if (!members[0] || members[0].role !== "owner") return [];
     return sql`
       SELECT id, expires_at, maximum_uses, use_count, revoked_at, created_at
       FROM workspace_invite_codes WHERE organization_id = ${organizationId}

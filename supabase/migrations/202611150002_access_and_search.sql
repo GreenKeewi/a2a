@@ -19,6 +19,31 @@ INSERT INTO workspace_settings (organization_id, slug, display_name)
 SELECT id, slug, name FROM organization
 ON CONFLICT (organization_id) DO NOTHING;
 
+CREATE FUNCTION audit_member_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
+    VALUES (NEW.organization_id, NEW.user_id, 'membership.joined', NEW.user_id::text);
+    IF NEW.role = 'owner' AND NOT EXISTS (
+      SELECT 1 FROM audit_events WHERE organization_id = NEW.organization_id AND action = 'workspace.created'
+    ) THEN
+      INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
+      VALUES (NEW.organization_id, NEW.user_id, 'workspace.created', NEW.organization_id::text);
+    END IF;
+  ELSIF TG_OP = 'DELETE' THEN
+    INSERT INTO audit_events (organization_id, action, target_id)
+    VALUES (OLD.organization_id, 'membership.removed', OLD.user_id::text);
+  ELSIF TG_OP = 'UPDATE' AND NEW.role IS DISTINCT FROM OLD.role THEN
+    INSERT INTO audit_events (organization_id, action, target_id, metadata)
+    VALUES (NEW.organization_id, 'membership.role_changed', NEW.user_id::text,
+            jsonb_build_object('from', OLD.role, 'to', NEW.role));
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER member_audit
+  AFTER INSERT OR DELETE OR UPDATE OF role ON member
+  FOR EACH ROW EXECUTE FUNCTION audit_member_change();
+
 -- Search is ranked only after authorized workspace/thread filtering in the API.
 ALTER TABLE messages ADD COLUMN search_vector tsvector
   GENERATED ALWAYS AS (to_tsvector('english', coalesce(subject, '') || ' ' || coalesce(body, ''))) STORED;
@@ -47,4 +72,10 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', item.tablename);
     END IF;
   END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM authenticated';
+  END IF;
 END $$;
