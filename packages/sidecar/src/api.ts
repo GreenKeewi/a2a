@@ -24,13 +24,13 @@ async function request<T>(url: string, schema: z.ZodType<T>, options: RequestIni
   catch { throw new ApiError("INVALID_RESPONSE", response.status); }
 }
 
-export async function pairAgent(apiUrl: string, code: string) {
+export async function pairAgent(apiUrl: string, code: string, hostType: "claude-code" | "codex") {
   const base = new URL(apiUrl);
   if (base.protocol !== "https:" && !(base.protocol === "http:" && ["127.0.0.1", "localhost"].includes(base.hostname))) {
     throw new Error("A2A API URL must use HTTPS");
   }
   return request(new URL("/api/agents/pair", base).toString(), pairedSchema, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }),
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, hostType }),
   });
 }
 

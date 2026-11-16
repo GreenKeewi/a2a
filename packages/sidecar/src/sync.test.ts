@@ -53,8 +53,8 @@ it("recovers dropped events through cursor catch-up and keeps only 100 headers",
 
 it("preserves corrupt cache and writes no token or pairing code to project config", async () => {
   const directory = await mkdtemp(join(tmpdir(), "a2a-config-"));
-  const previousAppData = process.env.APPDATA;
-  process.env.APPDATA = directory;
+  const previousConfigHome = process.env.A2A_CONFIG_HOME;
+  process.env.A2A_CONFIG_HOME = directory;
   try {
     const path = join(directory, "cache.json");
     await writeFile(path, "broken-json");
@@ -73,8 +73,12 @@ it("preserves corrupt cache and writes no token or pairing code to project confi
     const config = await readFile(join(directory, ".a2a", "config.json"), "utf8");
     expect(config).not.toMatch(/a2a_[A-Za-z0-9_-]{43}|A2A-PAIR-/);
     expect(config).toContain("sb_publishable_test");
+    await expect(saveConfig(directory, {
+      apiUrl: "https://another.example", realtimeUrl: "https://realtime.example", publishableKey: "sb_publishable_test",
+      organizationId: randomUUID(),
+    })).rejects.toThrow("already connected");
   } finally {
-    if (previousAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = previousAppData;
+    if (previousConfigHome === undefined) delete process.env.A2A_CONFIG_HOME; else process.env.A2A_CONFIG_HOME = previousConfigHome;
     await rm(directory, { recursive: true, force: true });
   }
 });

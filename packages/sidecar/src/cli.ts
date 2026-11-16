@@ -57,7 +57,7 @@ async function init() {
   if (!apiUrl) throw new Error("Usage: a2a init --host codex|claude-code --url https://your-a2a-app.example");
   const code = await readPairingCode();
   if (!code) throw new Error("A pairing code is required");
-  const paired = await pairAgent(apiUrl, code);
+  const paired = await pairAgent(apiUrl, code, hostType);
   const config: SidecarConfig = {
     apiUrl: new URL(apiUrl).origin, realtimeUrl: paired.realtime.url, publishableKey: paired.realtime.publishableKey,
     organizationId: paired.organizationId,
@@ -68,8 +68,9 @@ async function init() {
     throw new Error("Pairing code belongs to a different host type. Use the matching agent.");
   }
   const credentials = new OsCredentialStore();
+  try { await saveConfig(process.cwd(), config); }
+  catch (error) { await new AgentApi(connection, paired.token).revoke(); throw error; }
   await credentials.set(connection, paired.token);
-  await saveConfig(process.cwd(), config);
   await saveHostIdentity(process.cwd(), { hostType, agentId: paired.agentId });
   process.stdout.write(`Paired ${hostType} agent ${paired.agentId}. Public project config saved in .a2a/config.json.\n`);
 }
@@ -104,7 +105,10 @@ async function daemon() {
   const sync = new SyncEngine(api, userCachePath(config.agentId), (header) => {
     process.stdout.write(`[a2a] ${header.priority}: ${header.subject}\n`);
   });
-  const session = new RealtimeSession(config, api, sync);
+  const session = new RealtimeSession(config, api, sync, undefined, () => {
+    process.stderr.write("a2a: agent credential revoked; run a2a init again.\n");
+    process.exitCode = 1;
+  });
   await session.start();
   const stop = () => void session.stop().then(() => process.exit(0));
   process.once("SIGINT", stop);

@@ -14,7 +14,8 @@ export class RealtimeSession {
   private stopped = false;
 
   constructor(private readonly config: AgentConnection, private readonly api: Pick<AgentApi, "realtimeToken" | "heartbeat">,
-    private readonly sync: Pick<SyncEngine, "sync" | "setConnection" | "onRealtimeEvent">, client?: SupabaseClient) {
+    private readonly sync: Pick<SyncEngine, "sync" | "setConnection" | "onRealtimeEvent">, client?: SupabaseClient,
+    private readonly onRevoked: () => void = () => {}) {
     this.client = client ?? createClient(config.realtimeUrl, config.publishableKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     });
@@ -55,6 +56,7 @@ export class RealtimeSession {
 
   private handleError(error: unknown) {
     if (error instanceof ApiError && error.code === "UNAUTHENTICATED") {
+      this.onRevoked();
       void this.stop().catch(() => {});
       return;
     }

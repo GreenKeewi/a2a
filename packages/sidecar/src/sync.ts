@@ -48,6 +48,14 @@ export class SyncEngine {
   }
 
   private async run(): Promise<SidecarCache> {
+    // Drain urgent notices first; refreshing 100 cached headers must not delay them.
+    for (;;) {
+      const pending = await this.api.pendingNotices();
+      if (!pending.length) break;
+      for (const item of pending) this.onNotice(item, Math.max(0, Date.now() - new Date(item.createdAt).getTime()));
+      await this.api.acknowledgeNotices(pending.map((item) => item.id));
+      if (pending.length < 25) break;
+    }
     const fetched: InboxHeader[] = [];
     let cursor: string | null = null;
     let briefing: unknown;
@@ -64,15 +72,6 @@ export class SyncEngine {
         ? briefing.briefVersion : previous.briefingVersion,
       lastSyncedAt: new Date().toISOString(),
     }));
-    // Pending notices are tracked per recipient in the database, independent of
-    // created_at order. A delayed transaction cannot hide behind a newer cursor.
-    for (;;) {
-      const pending = await this.api.pendingNotices();
-      if (!pending.length) break;
-      for (const item of pending) this.onNotice(item, Math.max(0, Date.now() - new Date(item.createdAt).getTime()));
-      await this.api.acknowledgeNotices(pending.map((item) => item.id));
-      if (pending.length < 25) break;
-    }
     return next;
   }
 

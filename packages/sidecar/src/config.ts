@@ -40,6 +40,15 @@ export async function findConfig(start = process.cwd()): Promise<{ path: string;
 export async function saveConfig(projectRoot: string, value: SidecarConfig) {
   const config = configSchema.parse(value);
   const path = configPath(projectRoot);
+  try {
+    const existing = configSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    if (JSON.stringify(existing) !== JSON.stringify(config)) {
+      throw new Error("This project is already connected to a different A2A workspace or server.");
+    }
+    return;
+  } catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") throw error;
+  }
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -47,8 +56,8 @@ export async function saveConfig(projectRoot: string, value: SidecarConfig) {
 }
 
 function userConfigRoot() {
-  return platform() === "win32" ? process.env.APPDATA ?? join(homedir(), "AppData", "Roaming") :
-    platform() === "darwin" ? join(homedir(), "Library", "Application Support") : process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+  return process.env.A2A_CONFIG_HOME ?? (platform() === "win32" ? process.env.APPDATA ?? join(homedir(), "AppData", "Roaming") :
+    platform() === "darwin" ? join(homedir(), "Library", "Application Support") : process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"));
 }
 
 export function hostIdentityPath(projectRoot: string, hostType: HostIdentity["hostType"]) {

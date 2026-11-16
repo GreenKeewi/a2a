@@ -91,7 +91,7 @@ export async function createPairingCode(sql: Sql, organizationId: string, agentI
   return code;
 }
 
-export async function exchangePairingCode(sql: Sql, input: string) {
+export async function exchangePairingCode(sql: Sql, input: string, expectedHostType?: "claude-code" | "codex") {
   const code = input.trim().toUpperCase();
   if (!/^A2A-PAIR-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(code)) throw new AgentError("INVALID_PAIRING_CODE");
   const codeHash = hash(code);
@@ -102,7 +102,8 @@ export async function exchangePairingCode(sql: Sql, input: string) {
       WHERE p.code_hash = ${codeHash} AND p.used_at IS NULL AND p.expires_at > now() AND a.revoked_at IS NULL FOR UPDATE OF p
     `;
     const row = rows[0];
-    if (!row || !timingSafeEqual(Buffer.from(String(row.code_hash), "hex"), Buffer.from(codeHash, "hex"))) {
+    if (!row || !timingSafeEqual(Buffer.from(String(row.code_hash), "hex"), Buffer.from(codeHash, "hex")) ||
+        (expectedHostType && row.host_type !== expectedHostType)) {
       throw new AgentError("INVALID_PAIRING_CODE");
     }
     await tx`UPDATE agent_pairing_codes SET used_at = now() WHERE id = ${row.id} AND used_at IS NULL`;

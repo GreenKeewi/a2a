@@ -1,7 +1,8 @@
 -- Realtime is a hint. Durable tables and inbox catch-up remain the source of truth.
 CREATE SCHEMA IF NOT EXISTS a2a_private;
 REVOKE ALL ON SCHEMA a2a_private FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES IN SCHEMA a2a_private REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- Every later migration that adds functions here must revoke its inherited
+-- PUBLIC/anon/authenticated EXECUTE grants explicitly before committing.
 
 ALTER TABLE public.message_recipients ADD COLUMN notice_ack_at timestamptz;
 CREATE INDEX message_recipients_pending_notice_idx ON public.message_recipients (agent_id, message_id)
@@ -152,11 +153,9 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
     REVOKE ALL ON SCHEMA a2a_private FROM anon;
     REVOKE ALL ON ALL FUNCTIONS IN SCHEMA a2a_private FROM anon;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA a2a_private REVOKE EXECUTE ON FUNCTIONS FROM anon;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
     REVOKE ALL ON ALL FUNCTIONS IN SCHEMA a2a_private FROM authenticated;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA a2a_private REVOKE EXECUTE ON FUNCTIONS FROM authenticated;
     GRANT USAGE ON SCHEMA a2a_private TO authenticated;
     GRANT EXECUTE ON FUNCTION a2a_private.a2a_can_receive_realtime(text) TO authenticated;
     IF to_regclass('realtime.messages') IS NOT NULL THEN

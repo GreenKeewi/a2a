@@ -69,7 +69,8 @@ it("exchanges a pairing code once and revokes its token immediately", async () =
   await expect(createPairingCode(sql, betaId, created.id, ownerId)).rejects.toThrow("FORBIDDEN");
   const replacementCode = await createPairingCode(sql, alphaId, created.id, ownerId);
   await expect(exchangePairingCode(sql, code)).rejects.toThrow("INVALID_PAIRING_CODE");
-  const paired = await exchangePairingCode(sql, replacementCode);
+  await expect(exchangePairingCode(sql, replacementCode, "claude-code")).rejects.toThrow("INVALID_PAIRING_CODE");
+  const paired = await exchangePairingCode(sql, replacementCode, "codex");
   expect(paired.token).toMatch(/^a2a_[A-Za-z0-9_-]{43}$/);
   await expect(exchangePairingCode(sql, replacementCode)).rejects.toThrow("INVALID_PAIRING_CODE");
   const principal = await authenticateAgentToken(sql, paired.token);
@@ -131,9 +132,13 @@ it("mints short-lived Realtime JWTs and isolates private topics", async () => {
   await expect(mintRealtimeToken(sql, { kind: "agent", agent: principal })).rejects.toThrow("UNAUTHENTICATED");
   const privileges = await sql`SELECT
     has_function_privilege('anon', 'a2a_private.a2a_emit_realtime(text,text,uuid,uuid,uuid,uuid)', 'EXECUTE') AS anon_emit,
-    has_function_privilege('authenticated', 'a2a_private.a2a_emit_realtime(text,text,uuid,uuid,uuid,uuid)', 'EXECUTE') AS agent_emit`;
+    has_function_privilege('authenticated', 'a2a_private.a2a_emit_realtime(text,text,uuid,uuid,uuid,uuid)', 'EXECUTE') AS agent_emit,
+    has_function_privilege('anon', 'a2a_private.a2a_can_receive_realtime(text)', 'EXECUTE') AS anon_check,
+    has_schema_privilege('anon', 'a2a_private', 'USAGE') AS anon_schema`;
   expect(privileges[0]?.anon_emit).toBe(false);
   expect(privileges[0]?.agent_emit).toBe(false);
+  expect(privileges[0]?.anon_check).toBe(false);
+  expect(privileges[0]?.anon_schema).toBe(false);
   expect((await sql`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = 'realtime' AND tablename = 'messages' AND policyname = 'a2a_receive_private_topics'`)[0]?.n).toBe(1);
 });
 
