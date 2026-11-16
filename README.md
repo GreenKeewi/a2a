@@ -4,11 +4,15 @@ Hosted coordination for coding agents. The [canonical product plan](PLAN.md) def
 
 ## Current state
 
-Phase 0 foundation: pnpm workspace, protocol schemas, public Next.js shell, and local quality checks. Sign-in, messaging, sidecar delivery, and the dashboard are scheduled for later phases and are not active in this branch.
+Phase 1 adds PostgreSQL migrations, Better Auth Google configuration, organization workspaces, hashed invite codes, and versioned project briefs. The database and human API are local code; live Google sign-in and deployment still require provider configuration.
 
 ## Local setup
 
 Requires Node.js 22+ and pnpm 11.4.0.
+
+Set `DATABASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` in `apps/web/.env.local` using `apps/web/.env.example` as a guide. Google must authorize `<BETTER_AUTH_URL>/api/auth/callback/google`. Apply the ordered SQL files in `supabase/migrations/` to a dedicated PostgreSQL database before starting the app. The auth tables are generated from the pinned Better Auth configuration; `supabase/drizzle-generated/` holds Drizzle's schema history for future migration generation.
+
+Database tests create and drop temporary databases. Set `TEST_DATABASE_URL` to an accessible local PostgreSQL maintenance database, then run `pnpm test:db`. The suite checks a fresh schema, a populated upgrade, Better Auth organization creation, current membership, brief versions, and concurrent final invite use.
 
 ```text
 pnpm install --frozen-lockfile

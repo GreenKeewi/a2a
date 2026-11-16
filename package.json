@@ -8,6 +8,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "test": "pnpm --filter @a2a/protocol test",
+    "test:db": "pnpm --filter @a2a/web test:db",
     "build": "pnpm --filter @a2a/web build",
     "lint": "eslint apps packages e2e playwright.config.ts eslint.config.mjs",
     "test:e2e": "playwright test",
@@ -19,6 +20,7 @@
     "eslint": "9.39.5",
     "eslint-config-next": "16.4.6",
     "lintapple": "0.1.24",
+    "tsx": "4.20.6",
     "typescript": "5.9.3"
   }
 }
