@@ -462,7 +462,7 @@ export async function readAgentMessage(sql: Sql, principal: AgentPrincipal, mess
 export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threadId: string) {
   return sql.begin(async (tx) => {
     const threads = await tx`
-      SELECT t.rolling_summary, t.summary_version FROM threads t
+      SELECT t.id FROM threads t
       JOIN thread_agent_members tm ON tm.thread_id = t.id
       WHERE t.id = ${threadId} AND t.organization_id = ${principal.organizationId} AND tm.agent_id = ${principal.agentId}
     `;
@@ -483,8 +483,8 @@ export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threa
       WHERE agent_id = ${principal.agentId} AND message_id = ANY(${ids}::uuid[])
     `;
     return {
-      threadId, summary: threads[0].rolling_summary ? String(threads[0].rolling_summary) : null,
-      summaryVersion: Number(threads[0].summary_version),
+      threadId, summary: null,
+      summaryVersion: 0,
       messages: rows.reverse().map((row) => ({
         id: String(row.id), type: String(row.type), priority: String(row.priority),
         subject: String(row.subject), body: String(row.body), parts: row.parts,

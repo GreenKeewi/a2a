@@ -10,7 +10,7 @@ function iso(value: unknown) { return value instanceof Date ? value.toISOString(
 export async function getWorkspaceContext(sql: Sql, organizationId: string) {
   const [decisions, openItems] = await Promise.all([
     sql`SELECT id, title, summary, status, created_at, model_metadata FROM decision_records
-        WHERE organization_id = ${organizationId} ORDER BY created_at DESC LIMIT 50`,
+        WHERE organization_id = ${organizationId} AND status = 'confirmed' ORDER BY created_at DESC LIMIT 50`,
     sql`SELECT m.id, m.thread_id, m.type, m.subject, m.body, m.created_at,
                coalesce(a.handle, u.name, 'Member') AS sender,
                CASE WHEN m.created_at <= now() - make_interval(mins => s.escalate_after_minutes) THEN 'escalated'
@@ -21,7 +21,9 @@ export async function getWorkspaceContext(sql: Sql, organizationId: string) {
         JOIN workspace_settings s ON s.organization_id = m.organization_id
         WHERE m.organization_id = ${organizationId} AND m.response_state = 'open'
           AND m.type IN ('blocker', 'question')
-        ORDER BY m.created_at DESC LIMIT 50`,
+        ORDER BY CASE WHEN m.created_at <= now() - make_interval(mins => s.escalate_after_minutes) THEN 0
+                      WHEN m.created_at <= now() - make_interval(mins => s.reminder_after_minutes) THEN 1
+                      ELSE 2 END, m.created_at ASC, m.id ASC LIMIT 50`,
   ]);
   return { decisions, openItems };
 }
@@ -51,7 +53,7 @@ export async function getHumanInbox(sql: Sql, organizationId: string, limit = 40
 }
 
 export async function getHumanThread(sql: Sql, organizationId: string, threadId: string) {
-  const threads = await sql`SELECT id, kind, name, rolling_summary FROM threads WHERE id = ${threadId} AND organization_id = ${organizationId}`;
+  const threads = await sql`SELECT id, kind, name FROM threads WHERE id = ${threadId} AND organization_id = ${organizationId}`;
   if (!threads[0]) throw new WorkspaceError("FORBIDDEN");
   const rows = await sql`
     SELECT m.id, m.thread_id, m.sender_user_id, m.sender_agent_id, m.type, m.priority, m.subject, m.body,
@@ -66,10 +68,11 @@ export async function getHumanThread(sql: Sql, organizationId: string, threadId:
   const suggestions = await sql`
     SELECT kind, value, source_message_id, model, prompt_version, source_version, confidence, generated_at
     FROM smart_outputs WHERE organization_id = ${organizationId} AND thread_id = ${threadId}
+      AND EXISTS (SELECT 1 FROM workspace_settings s WHERE s.organization_id = ${organizationId} AND s.smart_features_enabled)
     ORDER BY generated_at DESC LIMIT 100
   `;
   return { threadId, kind: String(threads[0].kind), name: threads[0].name ? String(threads[0].name) : null,
-    summary: threads[0].rolling_summary ? String(threads[0].rolling_summary) : null,
+    summary: null,
     suggestions: suggestions.map((row) => ({ kind: String(row.kind), value: row.value,
       sourceMessageId: String(row.source_message_id), model: String(row.model),
       promptVersion: String(row.prompt_version), sourceVersion: String(row.source_version),
