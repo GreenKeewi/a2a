@@ -69,6 +69,22 @@ export async function createAgent(sql: Sql, organizationId: string, userId: stri
   });
 }
 
+export async function updateAgentScopes(sql: Sql, organizationId: string, userId: string, agentId: string, scopes: string[]) {
+  const parsed = agentInputSchema.shape.scopes.safeParse(scopes);
+  if (!parsed.success) throw new AgentError("INVALID_REQUEST");
+  return sql.begin(async (tx) => {
+    const member = await tx`SELECT 1 FROM member WHERE organization_id = ${organizationId} AND user_id = ${userId} AND role = 'owner' FOR SHARE`;
+    if (!member.length) throw new AgentError("FORBIDDEN");
+    const rows = await tx`UPDATE agents SET scopes = ${parsed.data}, updated_at = now()
+      WHERE id = ${agentId} AND organization_id = ${organizationId} AND revoked_at IS NULL RETURNING id, handle`;
+    const updated = rows[0];
+    if (!updated) throw new AgentError("NOT_FOUND");
+    await tx`INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
+      VALUES (${organizationId}, ${userId}, 'agent.scopes.updated', ${agentId})`;
+    return { id: agentId, handle: String(updated.handle), scopes: parsed.data };
+  });
+}
+
 export async function createPairingCode(sql: Sql, organizationId: string, agentId: string, userId: string): Promise<string> {
   const codeBits = base32(randomBytes(5));
   const code = `A2A-PAIR-${codeBits.slice(0, 4)}-${codeBits.slice(4)}`;
@@ -225,8 +241,9 @@ function resolveRecipients(agents: Array<{ id: string; handle: string; scopes: s
 
 async function previousSend(sql: Sql, senderId: string, clientMessageId: string) {
   const rows = await sql`
-    SELECT m.id, m.thread_id, array_agg(a.handle ORDER BY a.handle) AS handles
-    FROM messages m JOIN message_recipients r ON r.message_id = m.id JOIN agents a ON a.id = r.agent_id
+    SELECT m.id, m.thread_id, CASE WHEN count(a.id) = 0 THEN ARRAY['human']::text[]
+      ELSE array_agg(a.handle ORDER BY a.handle) END AS handles
+    FROM messages m LEFT JOIN message_recipients r ON r.message_id = m.id LEFT JOIN agents a ON a.id = r.agent_id
     WHERE m.sender_agent_id = ${senderId} AND m.client_message_id = ${clientMessageId}
     GROUP BY m.id, m.thread_id
   `;
@@ -273,12 +290,18 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
         if (!thread.length) throw new AgentError("NOT_FOUND");
       }
       let routingAgents = allAgents;
+      const toHuman = targets.length === 1 && targets[0]?.toLowerCase() === "human";
+      if (toHuman && !threadId) throw new AgentError("INVALID_ROUTE");
       if (threadId && targets.includes("*")) {
         const members = await tx`SELECT agent_id FROM thread_agent_members WHERE thread_id = ${threadId}`;
         const memberIds = new Set(members.map((member) => String(member.agent_id)));
         routingAgents = allAgents.filter((agent) => memberIds.has(agent.id));
       }
-      const recipients = resolveRecipients(routingAgents, principal.agentId, targets);
+      const recipients = toHuman ? [] : resolveRecipients(routingAgents, principal.agentId, targets);
+      if (toHuman && threadId) {
+        const humanMessages = await tx`SELECT 1 FROM messages WHERE thread_id = ${threadId} AND organization_id = ${principal.organizationId} AND sender_user_id IS NOT NULL LIMIT 1`;
+        if (!humanMessages.length) throw new AgentError("INVALID_ROUTE");
+      }
       if (threadId) {
         const members = await tx`SELECT agent_id FROM thread_agent_members WHERE thread_id = ${threadId}`;
         if (recipients.some((recipient) => !members.some((member) => member.agent_id === recipient.id))) throw new AgentError("INVALID_ROUTE");
@@ -310,7 +333,7 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
         await tx`INSERT INTO message_recipients (message_id, agent_id) VALUES (${messageId}, ${recipient.id})`;
       }
       await tx`UPDATE threads SET last_message_at = now() WHERE id = ${threadId}`;
-      return { messageId, threadId, recipientHandles: recipients.map((recipient) => recipient.handle).sort() };
+      return { messageId, threadId, recipientHandles: toHuman ? ["human"] : recipients.map((recipient) => recipient.handle).sort() };
     });
     return { ...sent, senderUnreadCount: await senderUnreadCount(sql, principal.agentId) };
   } catch (error) {

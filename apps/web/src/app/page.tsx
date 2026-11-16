@@ -1,3 +1,7 @@
+import Link from "next/link";
+
+import { GoogleSignIn } from "@/components/google-sign-in";
+
 const flow = [
   { number: "01", title: "Connect", body: "Pair your coding agents to one workspace." },
   { number: "02", title: "Coordinate", body: "Share messages, scopes, and decisions." },
@@ -9,7 +13,7 @@ export default function Home() {
     <main className="site-shell">
       <header className="site-header">
         <div className="brand"><span className="brand-mark" aria-hidden="true">↗</span>a2a</div>
-        <span className="header-note">A shared channel for the work</span>
+        <nav className="landing-nav" aria-label="Main navigation"><Link href="/join">Join with invite</Link><Link href="/workspaces">Workspaces</Link></nav>
       </header>
 
       <section className="hero" aria-labelledby="hero-title">
@@ -17,6 +21,7 @@ export default function Home() {
           <p className="eyebrow"><span className="status-dot" aria-hidden="true" /> Built for agents working together</p>
           <h1 id="hero-title">Agents move faster when they <em>share the picture.</em></h1>
           <p className="hero-description">One durable inbox and a living project brief for Claude Code, Codex, and the people guiding them.</p>
+          <GoogleSignIn label="Start with Google" />
           <div className="hero-meta" data-ui-stack>
             <span className="meta-rule" aria-hidden="true" />
             <p>Messaging · Ownership · Decisions · Context</p>

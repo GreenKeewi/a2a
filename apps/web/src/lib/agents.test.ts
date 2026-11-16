@@ -9,9 +9,10 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import {
   acknowledgeAgentNotices, authenticateAgentToken, createAgent, createPairingCode, exchangePairingCode,
   getAgentBriefing, heartbeatAgent, listAgentInbox, listAgentTokensForHuman, listAgents, readAgentMessage, readAgentThread,
-  pendingAgentNotices, resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage,
+  pendingAgentNotices, resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage, updateAgentScopes,
 } from "./agents";
 import { mintRealtimeToken } from "./realtime";
+import { getDashboardStats, getHumanInbox, getHumanThread, sendHumanMessage } from "./human-dashboard";
 
 const adminUrl = process.env.TEST_DATABASE_URL;
 if (!adminUrl || !["localhost", "127.0.0.1"].includes(new URL(adminUrl).hostname)) {
@@ -62,6 +63,38 @@ afterAll(async () => {
   await admin.unsafe(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
   await admin.end();
 }, 60_000);
+
+it("shows a human-agent exchange and buckets messages on workspace-local days", async () => {
+  const workspaceId = randomUUID();
+  const slug = `dashboard-${workspaceId.slice(0, 8)}`;
+  await sql`INSERT INTO organization (id, name, slug, created_at) VALUES (${workspaceId}, 'Dashboard', ${slug}, now())`;
+  await sql`INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES (${randomUUID()}, ${workspaceId}, ${ownerId}, 'owner', now())`;
+  await sql`UPDATE workspace_settings SET timezone = 'America/Toronto' WHERE organization_id = ${workspaceId}`;
+  const created = await createAgent(sql, workspaceId, ownerId, { handle: "dashboard-agent", hostType: "codex", role: "API", scopes: [] });
+  await sql`UPDATE agents SET last_seen_at = now() WHERE id = ${created.id}`;
+  const human = await sendHumanMessage(sql, workspaceId, ownerId, { to: "dashboard-agent", type: "question", subject: "Schema handoff", body: "Please review the schema." });
+  const agentReply = await sendAgentMessage(sql, { agentId: created.id, organizationId: workspaceId }, {
+    to: "human", type: "fyi", subject: "Schema reviewed", body: "The schema is ready.",
+    threadId: human.threadId, replyTo: human.messageId, clientMessageId: randomUUID(),
+  });
+  expect(agentReply.recipientHandles).toEqual(["human"]);
+  expect((await getHumanInbox(sql, workspaceId))[0]?.threadId).toBe(human.threadId);
+  expect((await getHumanThread(sql, workspaceId, human.threadId)).messages.map((message) => message.senderType)).toEqual(["human", "agent"]);
+  await sql`UPDATE messages SET created_at = ((date_trunc('day', now() AT TIME ZONE 'America/Toronto') - interval '30 minutes') AT TIME ZONE 'America/Toronto') WHERE id = ${human.messageId}`;
+  await sql`UPDATE messages SET created_at = ((date_trunc('day', now() AT TIME ZONE 'America/Toronto') + interval '30 minutes') AT TIME ZONE 'America/Toronto') WHERE id = ${agentReply.messageId}`;
+  const stats = await getDashboardStats(sql, workspaceId, "America/Toronto");
+  expect(stats.cards.agentsOnline).toBe(1);
+  expect(stats.cards.unreadDeliveries).toBe(1);
+  expect(stats.cards.openItems).toBe(1);
+  expect(stats.days.slice(-2).map((day) => day.count)).toEqual([1, 1]);
+  expect(stats.activity[0]?.medianResponseSeconds).toBe(3600);
+  const scopes = await updateAgentScopes(sql, workspaceId, ownerId, created.id, ["apps/api/**"]);
+  expect(scopes.scopes).toEqual(["apps/api/**"]);
+  await expect(updateAgentScopes(sql, alphaId, ownerId, created.id, ["apps/web/**"])).rejects.toThrow("NOT_FOUND");
+  const humanDecision = await sendHumanMessage(sql, workspaceId, ownerId, { to: "dashboard-agent", type: "decision", subject: "Use SQL", body: "Apply reviewed migrations." });
+  const decisions = await sql`SELECT status FROM decision_records WHERE source_message_id = ${humanDecision.messageId}`;
+  expect(decisions[0]?.status).toBe("confirmed");
+}, 30_000);
 
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });

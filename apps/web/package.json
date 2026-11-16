@@ -13,6 +13,7 @@
   "dependencies": {
     "@a2a/protocol": "workspace:*",
     "@better-auth/drizzle-adapter": "1.7.25",
+    "@supabase/supabase-js": "2.119.0",
     "better-auth": "1.7.25",
     "drizzle-orm": "0.45.4",
     "jose": "6.2.17",
