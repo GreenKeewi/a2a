@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { auth } from "./auth";
+import { AgentError, authenticateAgentToken } from "./agents";
+import { sql } from "./db";
 import { WorkspaceError } from "./workspaces";
 
 export async function requireHuman(request: Request): Promise<string> {
@@ -16,6 +18,12 @@ export function requireSameOrigin(request: Request) {
   if (!base || request.headers.get("origin") !== new URL(base).origin) {
     throw new WorkspaceError("FORBIDDEN");
   }
+}
+
+export async function requireAgent(request: Request) {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) throw new AgentError("UNAUTHENTICATED");
+  return authenticateAgentToken(sql, authorization.slice(7));
 }
 
 export async function jsonBody<T extends z.ZodType>(request: Request, schema: T): Promise<z.output<T>> {
@@ -34,12 +42,12 @@ export async function respond(handler: () => Promise<unknown>) {
     const databaseCode = typeof error === "object" && error && "code" in error ? error.code : null;
     const authMessage = typeof error === "object" && error && "body" in error &&
       typeof error.body === "object" && error.body && "message" in error.body ? error.body.message : null;
-    const code = error instanceof WorkspaceError ? error.code :
+    const code = error instanceof WorkspaceError || error instanceof AgentError ? error.code :
       databaseCode === "23505" || authMessage === "Organization already exists" ? "CONFLICT" : "INTERNAL_ERROR";
     const apiCode = code === "ALREADY_MEMBER" ? "CONFLICT" :
-      code === "INVALID_INVITE" || code === "INVALID_BRIEF" ? "INVALID_REQUEST" : code;
+      code === "INVALID_INVITE" || code === "INVALID_BRIEF" || code === "INVALID_PAIRING_CODE" || code === "INVALID_ROUTE" ? "INVALID_REQUEST" : code;
     const status = apiCode === "UNAUTHENTICATED" ? 401 : apiCode === "FORBIDDEN" ? 403 : apiCode === "CONFLICT" ? 409 :
-      apiCode === "INVALID_REQUEST" ? 400 : 500;
+      apiCode === "NOT_FOUND" ? 404 : apiCode === "INVALID_REQUEST" ? 400 : 500;
     if (status === 500) console.error("a2a request failed", { requestId, errorCode: typeof databaseCode === "string" ? databaseCode : "unknown" });
     return Response.json({ data: null, error: { code: apiCode, message: apiCode }, requestId }, { status });
   }

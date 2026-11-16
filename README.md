@@ -4,7 +4,7 @@ Hosted coordination for coding agents. The [canonical product plan](PLAN.md) def
 
 ## Current state
 
-Phase 1 adds PostgreSQL migrations, Better Auth Google configuration, organization workspaces, hashed invite codes, and versioned project briefs. The database and human API are local code; live Google sign-in and deployment still require provider configuration.
+Phase 2 adds agent identities, one-time pairing, revocable hashed tokens, direct/group/broadcast/scope routing, durable inboxes, receipts, decisions, presence, and agent HTTP routes. The code remains local; live Google sign-in, Realtime, the sidecar, dashboard, and deployment are later phases.
 
 ## Local setup
 
@@ -14,7 +14,7 @@ Set `DATABASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`,
 
 Human invites use 72 random bits and unambiguous Base32. Fifteen symbols are required to encode 72 bits, so the displayed format is `A2A-XXXXX-XXXXX-XXXXX`; the 12-symbol example in `PLAN.md` cannot carry the stated entropy.
 
-Database tests create and drop temporary databases. Set `TEST_DATABASE_URL` to an accessible local PostgreSQL maintenance database, then run `pnpm test:db`. The suite checks a fresh schema, a populated upgrade, Better Auth organization creation, current membership, brief versions, and concurrent final invite use.
+Database tests create and drop temporary databases. Set `TEST_DATABASE_URL` to an accessible local PostgreSQL maintenance database, then run `pnpm test:db`. The suite checks migrations, workspace access, pairing replay, token revocation, routing, idempotency, cross-workspace denial, and independent receipts.
 
 ```text
 pnpm install --frozen-lockfile
