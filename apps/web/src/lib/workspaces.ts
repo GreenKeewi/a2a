@@ -35,7 +35,10 @@ function newInviteCode(): string {
 export async function readWorkspace(sql: Sql, organizationId: string, userId: string) {
   const rows = await sql`
     SELECT s.organization_id, s.slug, s.display_name, s.timezone, s.brief,
-           s.brief_version, s.smart_features_enabled, m.role
+           s.brief_version, s.smart_features_enabled,
+           coalesce((to_jsonb(s)->>'reminder_after_minutes')::int, 120) AS reminder_after_minutes,
+           coalesce((to_jsonb(s)->>'escalate_after_minutes')::int, 480) AS escalate_after_minutes,
+           m.role
     FROM workspace_settings s
     JOIN member m ON m.organization_id = s.organization_id
     WHERE s.organization_id = ${organizationId} AND m.user_id = ${userId}
@@ -47,7 +50,9 @@ export async function readWorkspace(sql: Sql, organizationId: string, userId: st
     organizationId: String(row.organization_id), slug: String(row.slug),
     displayName: String(row.display_name), timezone: String(row.timezone),
     brief: String(row.brief), briefVersion: Number(row.brief_version),
-    smartFeaturesEnabled: Boolean(row.smart_features_enabled), role: String(row.role),
+    smartFeaturesEnabled: Boolean(row.smart_features_enabled),
+    reminderAfterMinutes: Number(row.reminder_after_minutes), escalateAfterMinutes: Number(row.escalate_after_minutes),
+    role: String(row.role),
   };
 }
 

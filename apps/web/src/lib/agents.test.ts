@@ -12,7 +12,8 @@ import {
   pendingAgentNotices, resolveCoordinationItem, revokeAgent, revokeAgentToken, revokeAgentTokenForHuman, sendAgentMessage, updateAgentScopes,
 } from "./agents";
 import { mintRealtimeToken } from "./realtime";
-import { getDashboardStats, getHumanInbox, getHumanThread, sendHumanMessage } from "./human-dashboard";
+import { getDashboardStats, getHumanInbox, getHumanThread, getWorkspaceContext, sendHumanMessage } from "./human-dashboard";
+import { redactCredentials, runSmartJobs } from "./smart-worker";
 
 const adminUrl = process.env.TEST_DATABASE_URL;
 if (!adminUrl || !["localhost", "127.0.0.1"].includes(new URL(adminUrl).hostname)) {
@@ -114,6 +115,77 @@ it("reserves the human reply address as an agent handle", async () => {
   await expect(createAgent(sql, alphaId, ownerId, { handle: "human", hostType: "codex", role: "Conflict", scopes: [] }))
     .rejects.toThrow("INVALID_REQUEST");
 });
+
+it("runs optional smart work after sends with provenance and no delivery changes", async () => {
+  const workspaceId = randomUUID();
+  await sql`INSERT INTO organization (id, name, slug, created_at) VALUES (${workspaceId}, 'Smart', ${`smart-${workspaceId.slice(0, 8)}`}, now())`;
+  await sql`INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES (${randomUUID()}, ${workspaceId}, ${ownerId}, 'owner', now())`;
+  const agent = await createAgent(sql, workspaceId, ownerId, { handle: "smart-agent", hostType: "codex", role: "Reviewer", scopes: ["apps/api/**"] });
+  const disabled = await sendHumanMessage(sql, workspaceId, ownerId, { to: agent.handle, type: "fyi", subject: "Disabled", body: "No smart work." });
+  expect(await sql`SELECT id FROM smart_jobs WHERE message_id = ${disabled.messageId}`).toHaveLength(0);
+  await sql`UPDATE workspace_settings SET smart_features_enabled = true, smart_enabled_at = now() WHERE organization_id = ${workspaceId}`;
+  let threadId: string | undefined;
+  let lastMessageId = "";
+  const messageIds: string[] = [];
+  for (let index = 0; index < 6; index++) {
+    const sent = await sendHumanMessage(sql, workspaceId, ownerId, {
+      to: agent.handle, type: "question", subject: `Review ${index + 1}`,
+      body: index === 0 ? "Credential a2a_abcdefghijklmnop should be masked." : `Please review part ${index + 1}.`,
+      ...(threadId ? { threadId } : {}),
+    });
+    threadId = sent.threadId;
+    lastMessageId = sent.messageId;
+    messageIds.push(sent.messageId);
+  }
+  const before = await sql`SELECT count(*)::int AS messages, (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id WHERE m.organization_id = ${workspaceId}) AS recipients FROM messages WHERE organization_id = ${workspaceId}`;
+  await sql`DELETE FROM smart_jobs WHERE message_id = ${messageIds[0]!}`;
+  const prompts: string[] = [];
+  const summaryFlags: boolean[] = [];
+  const generated = await runSmartJobs(sql, { modelId: "test/model", limit: 10, model: async (input) => {
+    prompts.push(JSON.stringify(input.messages));
+    summaryFlags.push(input.allowSummary);
+    return { summary: input.allowSummary ? "Six review notes need attention." : null,
+      proposedDecision: input.allowSummary ? "Use the reviewed API plan." : null,
+      prioritySuggestion: "high", likelyScopeOwners: ["smart-agent", "made-up-agent"],
+      likelySecret: false, confidence: 0.8 };
+  } });
+  expect(generated).toMatchObject({ processed: 6, completed: 6, failed: 0 });
+  expect(summaryFlags).toContain(true);
+  expect(prompts.some((prompt) => prompt.includes("[redacted credential]"))).toBe(true);
+  expect(prompts.every((prompt) => !prompt.includes("a2a_abcdefghijklmnop"))).toBe(true);
+  expect(redactCredentials("sk-abcdefghijklmnop")).toBe("[redacted credential]");
+  const outputs = await sql`SELECT kind, model, prompt_version, source_version, confidence, generated_at, value
+    FROM smart_outputs WHERE organization_id = ${workspaceId}`;
+  expect(outputs.filter((row) => row.kind === "summary")).toHaveLength(1);
+  expect(outputs.find((row) => row.kind === "summary")?.source_version).toBe(lastMessageId);
+  expect(outputs.filter((row) => row.kind !== "secret_warning").every((row) => row.model === "test/model" && row.prompt_version === "a2a-triage-v1" && row.generated_at && Number(row.confidence) === 0.8)).toBe(true);
+  expect(outputs.find((row) => row.kind === "secret_warning")).toMatchObject({ model: "deterministic", prompt_version: "credential-pattern-v1" });
+  for (const row of outputs.filter((item) => item.kind === "scope_owner")) expect(row.value).toEqual(["smart-agent"]);
+  expect((await sql`SELECT rolling_summary, summary_through_message_id FROM threads WHERE id = ${threadId!}`)[0]).toMatchObject({
+    rolling_summary: "Six review notes need attention.", summary_through_message_id: lastMessageId,
+  });
+  expect((await getHumanThread(sql, workspaceId, threadId!)).suggestions.length).toBeGreaterThan(0);
+  const decision = await sql`SELECT status, model_metadata FROM decision_records WHERE source_message_id = ${lastMessageId}`;
+  expect(decision[0]?.status).toBe("proposed");
+  expect(decision[0]?.model_metadata).toMatchObject({ model: "test/model", sourceVersion: lastMessageId, confidence: 0.8 });
+  await sql`UPDATE workspace_settings SET reminder_after_minutes = 5, escalate_after_minutes = 10 WHERE organization_id = ${workspaceId}`;
+  await sql`UPDATE messages SET created_at = now() - interval '12 minutes' WHERE id = ${messageIds[0]!}`;
+  await sql`UPDATE messages SET created_at = now() - interval '7 minutes' WHERE id = ${messageIds[1]!}`;
+  const context = await getWorkspaceContext(sql, workspaceId);
+  expect(context.openItems.find((item) => item.id === messageIds[0])?.reminder_level).toBe("escalated");
+  expect(context.openItems.find((item) => item.id === messageIds[1])?.reminder_level).toBe("due");
+  expect(context.openItems.find((item) => item.id === lastMessageId)?.reminder_level).toBe("pending");
+  const after = await sql`SELECT count(*)::int AS messages, (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id WHERE m.organization_id = ${workspaceId}) AS recipients FROM messages WHERE organization_id = ${workspaceId}`;
+  expect(after[0]).toMatchObject(before[0]!);
+  const malformed = await sendHumanMessage(sql, workspaceId, ownerId, { to: agent.handle, type: "fyi", subject: "Malformed", body: "Keep delivery." });
+  const timeout = await sendHumanMessage(sql, workspaceId, ownerId, { to: agent.handle, type: "fyi", subject: "Timeout", body: "Keep delivery too." });
+  expect((await runSmartJobs(sql, { modelId: "test/model", limit: 1, model: async () => ({ invalid: true }) })).failed).toBe(1);
+  expect((await runSmartJobs(sql, { modelId: "test/model", limit: 1, deadlineMs: 15, model: async () => new Promise(() => {}) })).failed).toBe(1);
+  expect((await sql`SELECT body FROM messages WHERE id IN (${malformed.messageId}, ${timeout.messageId}) ORDER BY subject`).map((row) => row.body)).toEqual(["Keep delivery.", "Keep delivery too."]);
+  await sql`UPDATE workspace_settings SET smart_features_enabled = false WHERE organization_id = ${workspaceId}`;
+  const again = await sendHumanMessage(sql, workspaceId, ownerId, { to: agent.handle, type: "fyi", subject: "Disabled again", body: "No smart work." });
+  expect(await sql`SELECT id FROM smart_jobs WHERE message_id = ${again.messageId}`).toHaveLength(0);
+}, 60_000);
 
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });

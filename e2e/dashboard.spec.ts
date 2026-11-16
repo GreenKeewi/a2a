@@ -185,6 +185,39 @@ test("keyboard opens a thread and reaches the composer in order", async ({ page 
   await expect(page.getByLabel("Message")).toBeFocused();
 });
 
+test("smart suggestions and deterministic reminders remain reviewable", async ({ page }, testInfo) => {
+  await mockDashboard(page);
+  await page.route(`**/api/workspaces/demo/threads/${thread.threadId}`, (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: {
+    ...thread, summary: "Six notes need review.", suggestions: [
+      { kind: "summary", value: "Six notes need review.", sourceMessageId: thread.messages[0]!.id,
+        model: "test/model", promptVersion: "a2a-triage-v1", sourceVersion: thread.messages[0]!.id,
+        confidence: 0.8, generatedAt: "2026-11-16T15:00:00Z" },
+      { kind: "secret_warning", value: true, sourceMessageId: thread.messages[0]!.id,
+        model: "test/model", promptVersion: "a2a-triage-v1", sourceVersion: thread.messages[0]!.id,
+        confidence: 0.8, generatedAt: "2026-11-16T15:00:00Z" },
+    ],
+  }, error: null }) }));
+  await page.route("**/api/workspaces/demo/context", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: {
+    brief: workspace.brief, briefVersion: 2,
+    decisions: [{ id: "proposed", title: "Use reviewed migrations", summary: "Use reviewed migrations.", status: "proposed" }],
+    openItems: [{ id: thread.messages[0]!.id, thread_id: thread.threadId, type: "question", subject: "Schema handoff",
+      body: "Please review the schema.", sender: "Owner", reminder_level: "escalated" }],
+  }, error: null }) }));
+  await page.goto("/w/demo/inbox");
+  await page.getByRole("button", { name: /Schema handoff/ }).click();
+  await expect(page.getByRole("region", { name: "Smart suggestions" })).toContainText("a2a-triage-v1");
+  await expect(page.getByRole("region", { name: "Smart suggestions" })).toContainText("may contain a secret");
+  await expectUI(page, testInfo);
+  await page.goto("/w/demo/context");
+  await expect(page.getByText(/escalated reminder/)).toBeVisible();
+  await expect(page.getByText("proposed", { exact: true })).toBeVisible();
+  await expectUI(page, testInfo);
+  await page.goto("/w/demo/settings");
+  await expect(page.getByLabel("Remind after (minutes)")).toHaveValue("120");
+  await expect(page.getByLabel("Escalate after (minutes)")).toHaveValue("480");
+  await expectUI(page, testInfo);
+});
+
 test("human controls send, pair, invite, and save context", async ({ page }) => {
   test.setTimeout(90_000);
   await mockDashboard(page);

@@ -9,6 +9,8 @@ const updateSchema = z.strictObject({
   displayName: z.string().trim().min(1).max(80).optional(),
   timezone: z.string().min(1).max(80).optional(),
   smartFeaturesEnabled: z.boolean().optional(),
+  reminderAfterMinutes: z.number().int().min(5).max(10080).optional(),
+  escalateAfterMinutes: z.number().int().min(10).max(20160).optional(),
 }).refine((value) => Object.keys(value).length > 0);
 
 export async function GET(request: Request, { params }: Context) {
@@ -41,12 +43,24 @@ export async function PATCH(request: Request, { params }: Context) {
       display_name = coalesce(${input.displayName ?? null}, s.display_name),
       timezone = coalesce(${timezone ?? null}, s.timezone),
       smart_features_enabled = coalesce(${input.smartFeaturesEnabled ?? null}, s.smart_features_enabled),
+      smart_enabled_at = CASE
+        WHEN ${input.smartFeaturesEnabled ?? null}::boolean IS TRUE AND NOT s.smart_features_enabled THEN now()
+        WHEN ${input.smartFeaturesEnabled ?? null}::boolean IS FALSE THEN NULL
+        ELSE s.smart_enabled_at END,
+      reminder_after_minutes = coalesce(${input.reminderAfterMinutes ?? null}, s.reminder_after_minutes),
+      escalate_after_minutes = coalesce(${input.escalateAfterMinutes ?? null}, s.escalate_after_minutes),
       updated_at = now()
       WHERE s.organization_id = ${organizationId} AND EXISTS (
         SELECT 1 FROM member m WHERE m.organization_id = s.organization_id
         AND m.user_id = ${userId} AND m.role = 'owner')
+        AND coalesce(${input.escalateAfterMinutes ?? null}, s.escalate_after_minutes)
+          > coalesce(${input.reminderAfterMinutes ?? null}, s.reminder_after_minutes)
       RETURNING s.organization_id`;
-    if (!rows.length) throw new WorkspaceError("FORBIDDEN");
+    if (!rows.length) {
+      const owner = await sql`SELECT 1 FROM member WHERE organization_id = ${organizationId}
+        AND user_id = ${userId} AND role = 'owner'`;
+      throw new WorkspaceError(owner.length ? "INVALID_REQUEST" : "FORBIDDEN");
+    }
     return readWorkspace(sql, organizationId, userId);
   });
 }

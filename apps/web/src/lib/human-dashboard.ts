@@ -7,6 +7,25 @@ import { WorkspaceError } from "./workspaces";
 
 function iso(value: unknown) { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 
+export async function getWorkspaceContext(sql: Sql, organizationId: string) {
+  const [decisions, openItems] = await Promise.all([
+    sql`SELECT id, title, summary, status, created_at, model_metadata FROM decision_records
+        WHERE organization_id = ${organizationId} ORDER BY created_at DESC LIMIT 50`,
+    sql`SELECT m.id, m.thread_id, m.type, m.subject, m.body, m.created_at,
+               coalesce(a.handle, u.name, 'Member') AS sender,
+               CASE WHEN m.created_at <= now() - make_interval(mins => s.escalate_after_minutes) THEN 'escalated'
+                    WHEN m.created_at <= now() - make_interval(mins => s.reminder_after_minutes) THEN 'due'
+                    ELSE 'pending' END AS reminder_level
+        FROM messages m LEFT JOIN agents a ON a.id = m.sender_agent_id
+        LEFT JOIN "user" u ON u.id = m.sender_user_id
+        JOIN workspace_settings s ON s.organization_id = m.organization_id
+        WHERE m.organization_id = ${organizationId} AND m.response_state = 'open'
+          AND m.type IN ('blocker', 'question')
+        ORDER BY m.created_at DESC LIMIT 50`,
+  ]);
+  return { decisions, openItems };
+}
+
 export async function getHumanInbox(sql: Sql, organizationId: string, limit = 40) {
   const bounded = Math.max(1, Math.min(Math.trunc(limit || 40), 100));
   const rows = await sql`
@@ -44,8 +63,17 @@ export async function getHumanThread(sql: Sql, organizationId: string, threadId:
     LEFT JOIN agents a ON a.id = m.sender_agent_id LEFT JOIN "user" u ON u.id = m.sender_user_id
     ORDER BY m.created_at ASC, m.id ASC
   `;
+  const suggestions = await sql`
+    SELECT kind, value, source_message_id, model, prompt_version, source_version, confidence, generated_at
+    FROM smart_outputs WHERE organization_id = ${organizationId} AND thread_id = ${threadId}
+    ORDER BY generated_at DESC LIMIT 100
+  `;
   return { threadId, kind: String(threads[0].kind), name: threads[0].name ? String(threads[0].name) : null,
     summary: threads[0].rolling_summary ? String(threads[0].rolling_summary) : null,
+    suggestions: suggestions.map((row) => ({ kind: String(row.kind), value: row.value,
+      sourceMessageId: String(row.source_message_id), model: String(row.model),
+      promptVersion: String(row.prompt_version), sourceVersion: String(row.source_version),
+      confidence: Number(row.confidence), generatedAt: iso(row.generated_at) })),
     messages: rows.map((row) => ({ id: String(row.id), sender: String(row.sender), senderType: row.sender_agent_id ? "agent" : "human",
       type: String(row.type), priority: String(row.priority), subject: String(row.subject), body: String(row.body),
       parts: row.parts, responseState: String(row.response_state), createdAt: iso(row.created_at),
@@ -94,10 +122,10 @@ export async function sendHumanMessage(sql: Sql, organizationId: string, userId:
     const requiresResponse = parsed.data.type === "blocker" || parsed.data.type === "question";
     const parts = JSON.stringify([{ type: "text", text: parsed.data.body }, ...(parsed.data.refs ?? []).map((ref) => ({ type: "data", data: ref }))]);
     await tx`
-      INSERT INTO messages (id, organization_id, thread_id, sender_user_id, reply_to_message_id, type, priority,
+      INSERT INTO messages (id, organization_id, thread_id, sender_user_id, reply_to_message_id, type, priority, priority_explicit,
         subject, body, parts, requires_response, response_state)
       VALUES (${messageId}, ${organizationId}, ${threadId}, ${userId}, ${parsed.data.replyTo ?? null}, ${parsed.data.type},
-        ${priority}, ${parsed.data.subject}, ${parsed.data.body}, ${parts}::jsonb, ${requiresResponse}, ${requiresResponse ? "open" : "none"})
+        ${priority}, ${parsed.data.priority !== undefined}, ${parsed.data.subject}, ${parsed.data.body}, ${parts}::jsonb, ${requiresResponse}, ${requiresResponse ? "open" : "none"})
     `;
     if (parsed.data.type === "decision") {
       await tx`INSERT INTO decision_records (organization_id, source_message_id, title, summary, status)

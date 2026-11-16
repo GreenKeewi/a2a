@@ -323,9 +323,9 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
       const parts = JSON.stringify([{ type: "text", text: parsed.data.body }, ...(parsed.data.refs ?? []).map((ref) => ({ type: "data", data: ref }))]);
       await tx`
         INSERT INTO messages (id, organization_id, thread_id, sender_agent_id, client_message_id, reply_to_message_id,
-                              type, priority, subject, body, parts, requires_response, response_state)
+                              type, priority, priority_explicit, subject, body, parts, requires_response, response_state)
         VALUES (${messageId}, ${principal.organizationId}, ${threadId}, ${principal.agentId}, ${parsed.data.clientMessageId}, ${parsed.data.replyTo ?? null},
-                ${parsed.data.type}, ${priority}, ${parsed.data.subject}, ${parsed.data.body}, ${parts}::jsonb, ${requiresResponse}, ${requiresResponse ? "open" : "none"})
+                ${parsed.data.type}, ${priority}, ${parsed.data.priority !== undefined}, ${parsed.data.subject}, ${parsed.data.body}, ${parts}::jsonb, ${requiresResponse}, ${requiresResponse ? "open" : "none"})
       `;
       if (parsed.data.type === "decision") {
         await tx`
