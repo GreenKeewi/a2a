@@ -15,6 +15,6 @@ export async function GET(request: Request) {
         !timingSafeEqual(Buffer.from(secret), Buffer.from(supplied))) {
       throw new AgentError("UNAUTHENTICATED");
     }
-    return runSmartJobs(sql, { limit: 10 });
+    return runSmartJobs(sql, { limit: 8 });
   });
 }

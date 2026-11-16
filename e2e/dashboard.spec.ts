@@ -188,7 +188,10 @@ test("keyboard opens a thread and reaches the composer in order", async ({ page 
 test("smart suggestions and deterministic reminders remain reviewable", async ({ page }, testInfo) => {
   await mockDashboard(page);
   await page.route(`**/api/workspaces/demo/threads/${thread.threadId}`, (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: {
-    ...thread, summary: "Six notes need review.", suggestions: [
+    ...thread, summary: null, suggestions: [
+      ...Array.from({ length: 5 }, (_, index) => ({ kind: "priority", value: "high",
+        sourceMessageId: thread.messages[0]!.id, model: "test/model", promptVersion: "a2a-triage-v1",
+        sourceVersion: `${thread.messages[0]!.id}-${index}`, confidence: 0.8, generatedAt: "2026-11-16T16:00:00Z" })),
       { kind: "summary", value: "Six notes need review.", sourceMessageId: thread.messages[0]!.id,
         model: "test/model", promptVersion: "a2a-triage-v1", sourceVersion: thread.messages[0]!.id,
         confidence: 0.8, generatedAt: "2026-11-16T15:00:00Z" },
@@ -206,6 +209,7 @@ test("smart suggestions and deterministic reminders remain reviewable", async ({
   await page.goto("/w/demo/inbox");
   await page.getByRole("button", { name: /Schema handoff/ }).click();
   await expect(page.getByRole("region", { name: "Smart suggestions" })).toContainText("a2a-triage-v1");
+  await expect(page.getByRole("region", { name: "Smart suggestions" })).toContainText("Six notes need review.");
   await expect(page.getByRole("region", { name: "Smart suggestions" })).toContainText("may contain a secret");
   await expectUI(page, testInfo);
   await page.goto("/w/demo/context");

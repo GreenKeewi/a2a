@@ -157,7 +157,7 @@ export async function runSmartJobs(sql: Sql, options: { modelId?: string; model?
       const generatedAt = new Date().toISOString();
       const entries: Array<{ kind: string; value: string | string[] | boolean }> = [];
       if (allowSummary && output.summary) entries.push({ kind: "summary", value: output.summary });
-      if (output.proposedDecision && (source[0].type === "decision" || allowSummary)) entries.push({ kind: "proposed_decision", value: output.proposedDecision });
+      if (output.proposedDecision && allowSummary && source[0].type !== "decision") entries.push({ kind: "proposed_decision", value: output.proposedDecision });
       if (!input.priorityWasExplicit && source[0].type !== "blocker" && output.prioritySuggestion) entries.push({ kind: "priority", value: output.prioritySuggestion });
       if (ownerSuggestions.length) entries.push({ kind: "scope_owner", value: ownerSuggestions });
       if (output.likelySecret) entries.push({ kind: "secret_warning", value: true });

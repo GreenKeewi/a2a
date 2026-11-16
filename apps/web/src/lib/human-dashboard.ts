@@ -66,10 +66,12 @@ export async function getHumanThread(sql: Sql, organizationId: string, threadId:
     ORDER BY m.created_at ASC, m.id ASC
   `;
   const suggestions = await sql`
-    SELECT kind, value, source_message_id, model, prompt_version, source_version, confidence, generated_at
-    FROM smart_outputs WHERE organization_id = ${organizationId} AND thread_id = ${threadId}
+    SELECT o.kind, o.value, o.source_message_id, o.model, o.prompt_version, o.source_version, o.confidence, o.generated_at
+    FROM smart_outputs o JOIN messages source ON source.id = o.source_message_id
+    WHERE o.organization_id = ${organizationId} AND o.thread_id = ${threadId}
       AND EXISTS (SELECT 1 FROM workspace_settings s WHERE s.organization_id = ${organizationId} AND s.smart_features_enabled)
-    ORDER BY generated_at DESC LIMIT 100
+    ORDER BY CASE WHEN o.kind = 'summary' THEN 0 WHEN o.kind = 'secret_warning' THEN 1 ELSE 2 END,
+      source.created_at DESC, source.id DESC, o.generated_at DESC LIMIT 100
   `;
   return { threadId, kind: String(threads[0].kind), name: threads[0].name ? String(threads[0].name) : null,
     summary: null,
