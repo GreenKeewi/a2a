@@ -47,7 +47,7 @@ export const sendInputSchema = z.strictObject({
   to: z.union([recipient, z.array(recipient).min(1).max(25)]),
   type: messageTypeSchema,
   subject: z.string().max(80).trim().min(1).refine(safeLine, "Subject must be one line"),
-  body: z.string().max(8000).trim().min(1),
+  body: z.string().max(8000).trim().min(1).refine((value) => !value.includes("\0"), "Body contains NUL"),
   priority: messagePrioritySchema.optional(),
   threadId: uuid.optional(),
   replyTo: uuid.optional(),

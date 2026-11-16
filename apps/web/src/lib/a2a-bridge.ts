@@ -250,6 +250,11 @@ export class A2ABridgeHandler implements A2ARequestHandler {
             AND m.thread_id = ${String(existingTask.thread_id)} AND m.sender_agent_id = ${target.id} LIMIT 1`;
         if (reply.length) throw new UnsupportedOperationError();
         const sent = await submit(tx as unknown as Sql, true);
+        const stored = await tx`SELECT body, subject FROM messages WHERE id = ${sent.messageId}
+          AND organization_id = ${this.principal.organizationId} AND sender_agent_id = ${this.principal.agentId}`;
+        if (!stored[0] || String(stored[0].body) !== body || String(stored[0].subject) !== subject) {
+          throw new RequestMalformedError();
+        }
         const priorBinding = await tx`SELECT task_id FROM a2a_task_messages WHERE message_id = ${sent.messageId}`;
         if (priorBinding[0] && String(priorBinding[0].task_id) !== existingTaskId) throw new RequestMalformedError();
         await tx`INSERT INTO a2a_task_messages (task_id, message_id, external_message_id)
@@ -296,6 +301,9 @@ export class A2ABridgeHandler implements A2ARequestHandler {
 
   async listTasks(params: ListTasksRequest, context: ServerCallContext): Promise<ListTasksResponse> {
     checkContext(context, this.principal.organizationId);
+    if (params.contextId && (!tokenPattern.test(params.contextId) || params.contextId.includes("\0"))) {
+      throw new RequestMalformedError();
+    }
     const pageSize = params.pageSize === undefined ? 50 : params.pageSize;
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new RequestMalformedError();
     const offset = params.pageToken ? Number(Buffer.from(params.pageToken, "base64url").toString("utf8")) : 0;

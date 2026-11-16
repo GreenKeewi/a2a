@@ -31,6 +31,7 @@ describe("send input", () => {
     expect(sendInputSchema.safeParse({ ...validSend, subject: "x".repeat(80) + " " }).success).toBe(false);
     expect(sendInputSchema.safeParse({ ...validSend, body: "x".repeat(8001) }).success).toBe(false);
     expect(sendInputSchema.safeParse({ ...validSend, body: "x".repeat(8000) + " " }).success).toBe(false);
+    expect(sendInputSchema.safeParse({ ...validSend, body: "bad\0body" }).success).toBe(false);
   });
 
   it.each(["../secrets.txt", "src/../secrets.txt", "C:\\secrets.txt", "/etc/passwd", "\\\\server\\share", "src/\u0000bad.ts", "src/\u0085bad.ts", "src/\u202Ebad.ts"])(

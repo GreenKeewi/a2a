@@ -274,6 +274,10 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   const followup = await rpc("SendMessage", { message: { ...request.message,
     messageId: "external-message-3", taskId: pendingTask.id, metadata: { subject: "More detail" } } });
   expect(followup.body.result.task.id).toBe(pendingTask.id);
+  expect((await rpc("SendMessage", { message: { ...request.message, messageId: "external-message-3",
+    taskId: pendingTask.id, parts: [{ text: "Different follow-up" }],
+    metadata: { subject: "More detail" } } })).body.error.code).toBe(-32602);
+  expect((await rpc("ListTasks", { contextId: "bad\0context" })).body.error.code).toBe(-32602);
   const listed = await rpc("ListTasks", { contextId: task.contextId, pageSize: 1 });
   expect(listed.body.result.totalSize).toBe(2);
   expect(listed.body.result.tasks).toHaveLength(1);
