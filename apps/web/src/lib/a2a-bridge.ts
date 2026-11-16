@@ -46,15 +46,23 @@ function messageBody(message: Message) {
     return part.content.value;
   });
   const body = parts.join("\n").trim();
-  if (!body || body.length > 8_000) throw new RequestMalformedError();
+  if (!body || body.length > 8_000 || body.includes("\0")) throw new RequestMalformedError();
   return body;
 }
 
 function subjectFor(message: Message, body: string) {
   const supplied = message.metadata?.subject;
-  const firstLine = body.split(/\r?\n/, 1)[0]!.trim();
-  const subject = typeof supplied === "string" ? supplied.trim() :
-    firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine;
+  const firstLine = body.split(/\r?\n/, 1)[0]!.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").trim();
+  let derived = firstLine;
+  if (derived.length > 80) {
+    derived = "";
+    for (const character of firstLine) {
+      if (derived.length + character.length > 79) break;
+      derived += character;
+    }
+    derived = `${derived.trimEnd()}…`;
+  }
+  const subject = typeof supplied === "string" ? supplied.trim() : derived || "Message";
   if (!subject || subject.length > 80 || /[\x00-\x1f\x7f]/.test(subject)) throw new RequestMalformedError();
   return subject;
 }
@@ -235,6 +243,7 @@ export class A2ABridgeHandler implements A2ARequestHandler {
           AND organization_id = ${this.principal.organizationId} AND client_agent_id = ${this.principal.agentId}
           FOR UPDATE`;
         if (!locked[0] || locked[0].canceled_at) throw new UnsupportedOperationError();
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`${this.principal.agentId}:${message.messageId}`}::text, 0))`;
         const reply = await tx`SELECT 1 FROM a2a_task_messages tm JOIN messages m ON m.reply_to_message_id = tm.message_id
           JOIN message_recipients r ON r.message_id = m.id AND r.agent_id = ${this.principal.agentId}
           WHERE tm.task_id = ${existingTaskId} AND m.organization_id = ${this.principal.organizationId}
@@ -250,11 +259,17 @@ export class A2ABridgeHandler implements A2ARequestHandler {
         params.configuration?.returnImmediately), params.configuration?.historyLength);
     }
     const persistedTaskId = await this.sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`${this.principal.agentId}:${message.messageId}`}::text, 0))`;
       const sent = await submit(tx as unknown as Sql, true);
       const stored = await tx`SELECT body, subject FROM messages WHERE id = ${sent.messageId}
         AND organization_id = ${this.principal.organizationId} AND sender_agent_id = ${this.principal.agentId}`;
       if (!stored[0] || String(stored[0].body) !== body || String(stored[0].subject) !== subject) {
         throw new RequestMalformedError();
+      }
+      const priorBinding = await tx`SELECT task_id FROM a2a_task_messages WHERE message_id = ${sent.messageId}`;
+      if (priorBinding.length) {
+        const prior = await tx`SELECT initial_message_id FROM a2a_tasks WHERE id = ${String(priorBinding[0]!.task_id)}`;
+        if (!prior[0] || String(prior[0].initial_message_id) !== sent.messageId) throw new RequestMalformedError();
       }
       const taskId = randomUUID();
       await tx`INSERT INTO a2a_tasks

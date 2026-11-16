@@ -302,6 +302,22 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   const longSubject = await sql`SELECT id, thread_id, subject FROM messages WHERE organization_id = ${workspaceId} AND body = ${longBody.trim()}`;
   expect(String(longSubject[0]?.subject).length).toBeLessThanOrEqual(80);
   expect(longSubject[0]?.subject).toBe(`${longBody.slice(0, 79).trimEnd()}…`);
+  const unusualText = "Please review\tthe 👨‍💻 migration\u2028and its workspace rules.";
+  const unusual = await rpc("SendMessage", { message: { messageId: "unusual-plain-text", role: "ROLE_USER",
+    parts: [{ text: unusualText }] }, configuration: { returnImmediately: true } });
+  expect(unusual.body.error).toBeUndefined();
+  const unusualSubject = await sql`SELECT subject FROM messages WHERE organization_id = ${workspaceId}
+    AND sender_agent_id = ${sender.id} AND body = ${unusualText}`;
+  expect(unusualSubject[0]?.subject).toBe("Please review the 👨 💻 migration and its workspace rules.");
+  expect((await rpc("SendMessage", { message: { messageId: "nul-text", role: "ROLE_USER",
+    parts: [{ text: "Bad\0body" }] } })).body.error.code).toBe(-32602);
+  const emojiPrefix = "a".repeat(78) + "👨‍💻" + " more details";
+  const emoji = await rpc("SendMessage", { message: { messageId: "emoji-boundary", role: "ROLE_USER",
+    parts: [{ text: emojiPrefix }] }, configuration: { returnImmediately: true } });
+  expect(emoji.body.error).toBeUndefined();
+  const emojiSubject = await sql`SELECT subject FROM messages WHERE organization_id = ${workspaceId}
+    AND sender_agent_id = ${sender.id} AND body = ${emojiPrefix}`;
+  expect(String(emojiSubject[0]?.subject)).toBe(`${"a".repeat(78)}…`);
   const collision = await rpc("SendMessage", { message: { ...request.message,
     messageId: "long-plain-text", taskId: pendingTask.id, metadata: { subject: "Other", to: target.handle } } });
   expect(collision.body.error.code).toBe(-32602);
