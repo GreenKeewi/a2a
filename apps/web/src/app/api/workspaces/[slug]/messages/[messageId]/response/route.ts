@@ -15,12 +15,14 @@ export async function PATCH(request: Request, { params }: Context) {
     if (!z.uuid().safeParse(messageId).success) throw new WorkspaceError("INVALID_REQUEST");
     const organizationId = await resolveWorkspaceId(sql, slug, userId);
     const { state } = await jsonBody(request, inputSchema);
-    const rows = await sql`UPDATE messages SET response_state = ${state}, resolved_by_user_id = ${userId}, resolved_at = now()
-      WHERE id = ${messageId} AND organization_id = ${organizationId} AND response_state = 'open'
-      RETURNING id`;
-    if (!rows.length) throw new WorkspaceError("INVALID_REQUEST");
-    await sql`INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
-      VALUES (${organizationId}, ${userId}, 'message.response.resolved', ${messageId})`;
+    await sql.begin(async (tx) => {
+      const rows = await tx`UPDATE messages SET response_state = ${state}, resolved_by_user_id = ${userId}, resolved_at = now()
+        WHERE id = ${messageId} AND organization_id = ${organizationId} AND response_state = 'open'
+        RETURNING id`;
+      if (!rows.length) throw new WorkspaceError("CONFLICT");
+      await tx`INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
+        VALUES (${organizationId}, ${userId}, ${`message.response.${state}`}, ${messageId})`;
+    });
     return { id: messageId, state };
   });
 }

@@ -51,7 +51,7 @@ function scopesOverlap(left: string, right: string) {
 
 export async function createAgent(sql: Sql, organizationId: string, userId: string, input: AgentInput) {
   const parsed = agentInputSchema.safeParse(input);
-  if (!parsed.success) throw new AgentError("INVALID_REQUEST");
+  if (!parsed.success || parsed.data.handle.toLowerCase() === "human") throw new AgentError("INVALID_REQUEST");
   const normalizedHandle = parsed.data.handle.toLowerCase();
   const agentId = randomUUID();
   return sql.begin(async (tx) => {
@@ -79,9 +79,13 @@ export async function updateAgentScopes(sql: Sql, organizationId: string, userId
       WHERE id = ${agentId} AND organization_id = ${organizationId} AND revoked_at IS NULL RETURNING id, handle`;
     const updated = rows[0];
     if (!updated) throw new AgentError("NOT_FOUND");
+    const others = await tx`SELECT handle, scopes FROM agents WHERE organization_id = ${organizationId}
+      AND id <> ${agentId} AND revoked_at IS NULL`;
+    const overlapWarnings = others.flatMap((agent) =>
+      parsed.data.flatMap((scope) => (agent.scopes as string[]).some((owned) => scopesOverlap(scope, owned)) ? [String(agent.handle)] : []));
     await tx`INSERT INTO audit_events (organization_id, actor_user_id, action, target_id)
       VALUES (${organizationId}, ${userId}, 'agent.scopes.updated', ${agentId})`;
-    return { id: agentId, handle: String(updated.handle), scopes: parsed.data };
+    return { id: agentId, handle: String(updated.handle), scopes: parsed.data, overlapWarnings: [...new Set(overlapWarnings)] };
   });
 }
 
@@ -368,10 +372,9 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   const rows = await sql.unsafe(`
     SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.created_at,
            to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
-           coalesce(a.handle, u.name, 'member') AS sender_handle, r.read_at
+           CASE WHEN m.sender_user_id IS NOT NULL THEN 'human' ELSE coalesce(a.handle, 'member') END AS sender_handle, r.read_at
     FROM message_recipients r JOIN messages m ON m.id = r.message_id
     LEFT JOIN agents a ON a.id = m.sender_agent_id
-    LEFT JOIN "user" u ON u.id = m.sender_user_id
     WHERE ${clauses.join(" AND ")}
     ORDER BY m.created_at DESC, m.id DESC LIMIT $${args.length}
   `, args);
@@ -394,10 +397,9 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
 export async function pendingAgentNotices(sql: Sql, principal: AgentPrincipal) {
   const rows = await sql`
     SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.created_at,
-           coalesce(a.handle, u.name, 'member') AS sender_handle
+           CASE WHEN m.sender_user_id IS NOT NULL THEN 'human' ELSE coalesce(a.handle, 'member') END AS sender_handle
     FROM message_recipients r JOIN messages m ON m.id = r.message_id
     LEFT JOIN agents a ON a.id = m.sender_agent_id
-    LEFT JOIN "user" u ON u.id = m.sender_user_id
     WHERE r.agent_id = ${principal.agentId} AND m.organization_id = ${principal.organizationId}
       AND r.notice_ack_at IS NULL AND r.read_at IS NULL
     ORDER BY m.created_at ASC, m.id ASC LIMIT 25
@@ -446,12 +448,13 @@ export async function readAgentMessage(sql: Sql, principal: AgentPrincipal, mess
     UPDATE message_recipients r SET read_at = coalesce(r.read_at, now()), delivered_at = coalesce(r.delivered_at, now())
     FROM messages m WHERE r.message_id = m.id AND m.id = ${messageId}
       AND m.organization_id = ${principal.organizationId} AND r.agent_id = ${principal.agentId}
-    RETURNING m.id, m.thread_id, m.type, m.priority, m.subject, m.body, m.parts, m.created_at
+    RETURNING m.id, m.thread_id, m.type, m.priority, m.subject, m.body, m.parts, m.created_at, m.sender_user_id
   `;
   const row = rows[0];
   if (!row) throw new AgentError("NOT_FOUND");
   return { id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
-    subject: String(row.subject), body: String(row.body), parts: row.parts, createdAt: (row.created_at as Date).toISOString() };
+    subject: String(row.subject), body: String(row.body), parts: row.parts,
+    senderHandle: row.sender_user_id ? "human" : null, createdAt: (row.created_at as Date).toISOString() };
 }
 
 export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threadId: string) {
@@ -464,7 +467,7 @@ export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threa
     if (!threads[0]) throw new AgentError("NOT_FOUND");
     const rows = await tx`
       SELECT m.id, m.thread_id, m.type, m.priority, m.subject, m.body, m.parts, m.created_at,
-             a.handle AS sender_handle
+             CASE WHEN m.sender_user_id IS NOT NULL THEN 'human' ELSE a.handle END AS sender_handle
       FROM messages m LEFT JOIN agents a ON a.id = m.sender_agent_id
       WHERE m.thread_id = ${threadId} AND m.organization_id = ${principal.organizationId}
         AND (m.sender_agent_id = ${principal.agentId} OR EXISTS (

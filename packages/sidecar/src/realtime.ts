@@ -12,12 +12,14 @@ export class RealtimeSession {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryCount = 0;
   private stopped = false;
+  private currentJwt = "";
 
   constructor(private readonly config: AgentConnection, private readonly api: Pick<AgentApi, "realtimeToken" | "heartbeat">,
     private readonly sync: Pick<SyncEngine, "sync" | "setConnection" | "onRealtimeEvent">, client?: SupabaseClient,
     private readonly onRevoked: () => void = () => {}) {
     this.client = client ?? createClient(config.realtimeUrl, config.publishableKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      accessToken: async () => this.currentJwt,
     });
   }
 
@@ -67,7 +69,8 @@ export class RealtimeSession {
     const credentials = await this.api.realtimeToken();
     if (new URL(credentials.url).origin !== new URL(this.config.realtimeUrl).origin ||
         credentials.publishableKey !== this.config.publishableKey) throw new Error("Realtime project configuration changed");
-    await this.client.realtime.setAuth(credentials.token);
+    this.currentJwt = credentials.token;
+    await this.client.realtime.setAuth();
   }
 
   private scheduleRetry() {

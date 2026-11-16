@@ -32,6 +32,8 @@ export async function PATCH(request: Request, { params }: Context) {
     const input = await jsonBody(request, updateSchema);
     const timezone = input.timezone;
     if (timezone) {
+      try { new Intl.DateTimeFormat("en", { timeZone: timezone }); }
+      catch { throw new WorkspaceError("INVALID_REQUEST"); }
       const valid = await sql`SELECT 1 FROM pg_timezone_names WHERE name = ${timezone}`;
       if (!valid.length) throw new WorkspaceError("INVALID_REQUEST");
     }

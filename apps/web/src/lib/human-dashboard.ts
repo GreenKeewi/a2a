@@ -8,7 +8,7 @@ import { WorkspaceError } from "./workspaces";
 function iso(value: unknown) { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 
 export async function getHumanInbox(sql: Sql, organizationId: string, limit = 40) {
-  const bounded = Math.max(1, Math.min(limit, 100));
+  const bounded = Math.max(1, Math.min(Math.trunc(limit || 40), 100));
   const rows = await sql`
     SELECT t.id AS thread_id, t.kind, t.name, t.last_message_at,
       m.id AS message_id, m.type, m.priority, m.subject, m.body, m.created_at,
@@ -116,14 +116,14 @@ export async function getDashboardStats(sql: Sql, organizationId: string, timezo
       SELECT
         (SELECT count(*)::int FROM agents WHERE organization_id = ${organizationId} AND revoked_at IS NULL AND last_seen_at > now() - interval '90 seconds') AS online,
         (SELECT count(*)::int FROM messages WHERE organization_id = ${organizationId} AND created_at >= now() - interval '24 hours') AS messages_24h,
-        (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id WHERE m.organization_id = ${organizationId} AND r.read_at IS NULL) AS unread_deliveries,
+        (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id JOIN agents a ON a.id = r.agent_id WHERE m.organization_id = ${organizationId} AND a.revoked_at IS NULL AND r.read_at IS NULL) AS unread_deliveries,
         (SELECT count(*)::int FROM messages WHERE organization_id = ${organizationId} AND response_state = 'open' AND type IN ('blocker','question')) AS open_items
     `,
     sql`
       WITH dates AS (SELECT generate_series(
         (now() AT TIME ZONE ${timezone})::date - 6, (now() AT TIME ZONE ${timezone})::date, interval '1 day')::date AS day)
       SELECT d.day, count(m.id)::int AS count FROM dates d
-      LEFT JOIN messages m ON m.organization_id = ${organizationId} AND (m.created_at AT TIME ZONE ${timezone})::date = d.day
+      LEFT JOIN messages m ON m.organization_id = ${organizationId} AND m.created_at >= now() - interval '8 days' AND (m.created_at AT TIME ZONE ${timezone})::date = d.day
       GROUP BY d.day ORDER BY d.day
     `,
     sql`
@@ -131,10 +131,16 @@ export async function getDashboardStats(sql: Sql, organizationId: string, timezo
         (SELECT count(*)::int FROM messages m WHERE m.sender_agent_id = a.id AND m.organization_id = ${organizationId}) AS sent,
         (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id WHERE r.agent_id = a.id AND m.organization_id = ${organizationId}) AS received,
         (SELECT count(*)::int FROM message_recipients r JOIN messages m ON m.id = r.message_id WHERE r.agent_id = a.id AND m.organization_id = ${organizationId} AND r.read_at IS NULL) AS unread,
-        (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (reply.created_at - source.created_at)))
+        (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (first_reply.created_at - source.created_at)))
          FROM message_recipients r JOIN messages source ON source.id = r.message_id
-         JOIN messages reply ON reply.reply_to_message_id = source.id AND reply.sender_agent_id = a.id
-         WHERE r.agent_id = a.id AND source.organization_id = ${organizationId}) AS median_response_seconds
+         JOIN LATERAL (
+           SELECT min(reply.created_at) AS created_at FROM messages reply
+           WHERE reply.organization_id = source.organization_id AND reply.thread_id = source.thread_id
+             AND reply.sender_agent_id = a.id AND reply.created_at >= source.created_at
+             AND (reply.reply_to_message_id = source.id OR reply.reply_to_message_id IS NULL)
+         ) first_reply ON first_reply.created_at IS NOT NULL
+         WHERE r.agent_id = a.id AND source.organization_id = ${organizationId}
+           AND source.created_at >= now() - interval '7 days') AS median_response_seconds
       FROM agents a WHERE a.organization_id = ${organizationId} AND a.revoked_at IS NULL ORDER BY a.handle
     `,
   ]);

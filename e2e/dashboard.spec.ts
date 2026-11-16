@@ -35,6 +35,73 @@ test("dashboard routes render populated and empty states", async ({ page }, test
   await page.goto("/w/demo");
   await expect(page.getByText("Connect an agent to see its activity here.")).toBeVisible();
   await expectUI(page, testInfo);
+  await page.goto("/w/demo/inbox");
+  await expect(page.getByText("No threads yet. Send the first message to a connected agent.")).toBeVisible();
+  await expectUI(page, testInfo);
+  await page.goto("/w/demo/context");
+  await expect(page.getByText("No open blockers or questions.")).toBeVisible();
+  await expectUI(page, testInfo);
+  await page.goto("/w/demo/agents");
+  await expect(page.getByText("No agents yet. Create one below, then pair it from its host.")).toBeVisible();
+  await expectUI(page, testInfo);
+});
+
+test("inbox catches up without a page refresh and exposes failures", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  await page.clock.install();
+  let newMessage = false;
+  await mockDashboard(page, false);
+  await page.route("**/api/workspaces/demo/inbox", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: newMessage ? inbox : [], error: null }) }));
+  await page.goto("/w/demo/inbox");
+  await expect(page.getByText("No threads yet. Send the first message to a connected agent.")).toBeVisible();
+  newMessage = true;
+  await page.clock.runFor(31_000);
+  await expect(page.getByRole("button", { name: /Schema handoff/ })).toBeVisible();
+  await expectUI(page, testInfo);
+  await page.route("**/api/workspaces/demo", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ data: null, error: { message: "Workspace temporarily unavailable" } }) }));
+  await page.goto("/w/demo");
+  await expect(page.getByText(/Could not open this workspace/)).toBeVisible();
+  await expectUI(page, testInfo);
+});
+
+test("agent dialogs and keyboard focus run the owner controls", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  await mockDashboard(page);
+  const edits: string[][] = [];
+  let revokes = 0;
+  await page.route("**/api/workspaces/demo/agents/*", (route) => {
+    if (route.request().method() === "PATCH") edits.push(route.request().postDataJSON().scopes);
+    if (route.request().method() === "DELETE") revokes++;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: {}, error: null }) });
+  });
+  await page.goto("/w/demo/agents");
+  const edit = page.getByRole("button", { name: "Edit scopes" });
+  await edit.focus();
+  await expect(edit).toBeFocused();
+  page.once("dialog", async (dialog) => dialog.accept("apps/api/**\napps/web/**"));
+  await page.keyboard.press("Enter");
+  await expect.poll(() => edits.length).toBe(1);
+  expect(edits[0]).toEqual(["apps/api/**", "apps/web/**"]);
+  page.once("dialog", async (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Revoke", exact: true }).click();
+  await expect.poll(() => revokes).toBe(1);
+  await expectUI(page, testInfo);
+});
+
+test("a person can reply to every agent already in a group thread", async ({ page }) => {
+  await mockDashboard(page);
+  const second = { ...agents[0]!, id: "55555555-5555-4555-8555-555555555555", handle: "claude-ui", role: "UI builder" };
+  await page.route("**/api/workspaces/demo/agents", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [...agents, second], error: null }) }));
+  await page.route("**/api/workspaces/demo/inbox", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [{ ...inbox[0], participants: ["codex-api", "claude-ui"] }], error: null }) }));
+  await page.route("**/api/workspaces/demo/messages", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: { threadId: thread.threadId }, error: null }) }));
+  await page.goto("/w/demo/inbox");
+  await page.getByRole("button", { name: /Schema handoff/ }).click();
+  await page.getByLabel("Send to").selectOption("__all_thread__");
+  await page.getByLabel("Subject").fill("Shared follow-up");
+  await page.getByLabel("Message").fill("Both agents should see this.");
+  const sent = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/demo/messages") && request.method() === "POST");
+  await page.getByRole("button", { name: /Send message/ }).click();
+  expect((await sent).postDataJSON()).toMatchObject({ to: ["codex-api", "claude-ui"] });
 });
 
 test("human controls send, pair, invite, and save context", async ({ page }) => {

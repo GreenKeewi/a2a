@@ -73,8 +73,12 @@ it("shows a human-agent exchange and buckets messages on workspace-local days", 
   const created = await createAgent(sql, workspaceId, ownerId, { handle: "dashboard-agent", hostType: "codex", role: "API", scopes: [] });
   await sql`UPDATE agents SET last_seen_at = now() WHERE id = ${created.id}`;
   const human = await sendHumanMessage(sql, workspaceId, ownerId, { to: "dashboard-agent", type: "question", subject: "Schema handoff", body: "Please review the schema." });
+  const principal = { agentId: created.id, organizationId: workspaceId };
+  const agentInbox = await listAgentInbox(sql, principal);
+  expect(agentInbox.items[0]?.senderHandle).toBe("human");
+  expect((await readAgentThread(sql, principal, human.threadId)).messages[0]?.senderHandle).toBe("human");
   const agentReply = await sendAgentMessage(sql, { agentId: created.id, organizationId: workspaceId }, {
-    to: "human", type: "fyi", subject: "Schema reviewed", body: "The schema is ready.",
+    to: agentInbox.items[0]!.senderHandle, type: "fyi", subject: "Schema reviewed", body: "The schema is ready.",
     threadId: human.threadId, replyTo: human.messageId, clientMessageId: randomUUID(),
   });
   expect(agentReply.recipientHandles).toEqual(["human"]);
@@ -84,17 +88,32 @@ it("shows a human-agent exchange and buckets messages on workspace-local days", 
   await sql`UPDATE messages SET created_at = ((date_trunc('day', now() AT TIME ZONE 'America/Toronto') + interval '30 minutes') AT TIME ZONE 'America/Toronto') WHERE id = ${agentReply.messageId}`;
   const stats = await getDashboardStats(sql, workspaceId, "America/Toronto");
   expect(stats.cards.agentsOnline).toBe(1);
-  expect(stats.cards.unreadDeliveries).toBe(1);
+  expect(stats.cards.unreadDeliveries).toBe(0);
   expect(stats.cards.openItems).toBe(1);
   expect(stats.days.slice(-2).map((day) => day.count)).toEqual([1, 1]);
   expect(stats.activity[0]?.medianResponseSeconds).toBe(3600);
+  const laterReply = await sendAgentMessage(sql, principal, {
+    to: "human", type: "fyi", subject: "One more detail", body: "The schema is still ready.",
+    threadId: human.threadId, replyTo: human.messageId, clientMessageId: randomUUID(),
+  });
+  await sql`UPDATE messages SET created_at = (SELECT created_at + interval '2 hours' FROM messages WHERE id = ${human.messageId}) WHERE id = ${laterReply.messageId}`;
+  expect((await getDashboardStats(sql, workspaceId, "America/Toronto")).activity[0]?.medianResponseSeconds).toBe(3600);
   const scopes = await updateAgentScopes(sql, workspaceId, ownerId, created.id, ["apps/api/**"]);
   expect(scopes.scopes).toEqual(["apps/api/**"]);
+  const overlapping = await createAgent(sql, workspaceId, ownerId, { handle: "dashboard-reviewer", hostType: "claude-code", role: "Reviewer", scopes: ["apps/api/routes/**"] });
+  expect(overlapping.overlapWarnings).toEqual(["dashboard-agent"]);
+  const updatedOverlap = await updateAgentScopes(sql, workspaceId, ownerId, overlapping.id, ["apps/api/**"]);
+  expect(updatedOverlap.overlapWarnings).toEqual(["dashboard-agent"]);
   await expect(updateAgentScopes(sql, alphaId, ownerId, created.id, ["apps/web/**"])).rejects.toThrow("NOT_FOUND");
   const humanDecision = await sendHumanMessage(sql, workspaceId, ownerId, { to: "dashboard-agent", type: "decision", subject: "Use SQL", body: "Apply reviewed migrations." });
   const decisions = await sql`SELECT status FROM decision_records WHERE source_message_id = ${humanDecision.messageId}`;
   expect(decisions[0]?.status).toBe("confirmed");
 }, 30_000);
+
+it("reserves the human reply address as an agent handle", async () => {
+  await expect(createAgent(sql, alphaId, ownerId, { handle: "human", hostType: "codex", role: "Conflict", scopes: [] }))
+    .rejects.toThrow("INVALID_REQUEST");
+});
 
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });
