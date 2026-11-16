@@ -199,6 +199,87 @@ it("runs optional smart work after sends with provenance and no delivery changes
   expect(await sql`SELECT id FROM smart_jobs WHERE message_id = ${again.messageId}`).toHaveLength(0);
 }, 60_000);
 
+it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent replies", async () => {
+  const workspaceId = randomUUID();
+  await sql`INSERT INTO organization (id, name, slug, created_at) VALUES (${workspaceId}, 'A2A bridge', ${`bridge-${workspaceId.slice(0, 8)}`}, now())`;
+  await sql`INSERT INTO member (id, organization_id, user_id, role, created_at)
+    VALUES (${randomUUID()}, ${workspaceId}, ${ownerId}, 'owner', now())`;
+  const sender = await createAgent(sql, workspaceId, ownerId, { handle: "a2a-client", hostType: "codex", role: "Client", scopes: [] });
+  const target = await createAgent(sql, workspaceId, ownerId, { handle: "a2a-target", hostType: "claude-code", role: "Target", scopes: [] });
+  const token = (await exchangePairingCode(sql, await createPairingCode(sql, workspaceId, sender.id, ownerId))).token;
+  const cardRoute = await import("../app/api/a2a/agents/[handle]/card/route");
+  const rpcRoute = await import("../app/api/a2a/agents/[handle]/rpc/route");
+  const genericRoute = await import("../app/.well-known/agent-card.json/route");
+  const card = await cardRoute.GET(new Request("http://127.0.0.1:4300/api/a2a/agents/a2a-target/card",
+    { headers: { authorization: `Bearer ${token}` } }), { params: Promise.resolve({ handle: target.handle }) });
+  expect(card.status).toBe(200);
+  const cardBody = await card.json();
+  expect(cardBody.supportedInterfaces[0]).toMatchObject({ protocolBinding: "JSONRPC", protocolVersion: "1.0" });
+  expect(cardBody.capabilities).toMatchObject({ streaming: false, pushNotifications: false });
+  expect(cardBody.securityRequirements[0].schemes.bearer).toBeDefined();
+  expect((await genericRoute.GET()).status).toBe(200);
+  expect((await cardRoute.GET(new Request("http://127.0.0.1:4300/api/a2a/agents/a2a-target/card"),
+    { params: Promise.resolve({ handle: target.handle }) })).status).toBe(401);
+  const endpoint = `http://127.0.0.1:4300/api/a2a/agents/${target.handle}/rpc`;
+  async function rpc(method: string, params: unknown, bearer = token, version = "1.0") {
+    const response = await rpcRoute.POST(new Request(endpoint, { method: "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", "a2a-version": version },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "test-1", method, params }),
+    }), { params: Promise.resolve({ handle: target.handle }) });
+    return { status: response.status, body: await response.json() };
+  }
+  const request = { message: { messageId: "external-message-1", role: "ROLE_USER", parts: [{ text: "Review the schema." }],
+    metadata: { subject: "Schema review", type: "question" } } };
+  const first = await rpc("SendMessage", request);
+  expect(first.status).toBe(200);
+  expect(first.body.error).toBeUndefined();
+  const task = first.body.result.task;
+  expect(task.status.state).toBe("TASK_STATE_INPUT_REQUIRED");
+  expect(task.contextId).toBeTruthy();
+  const duplicate = await rpc("SendMessage", request);
+  expect(duplicate.body.result.task.id).toBe(task.id);
+  const source = await sql`SELECT id, thread_id, body FROM messages WHERE organization_id = ${workspaceId}
+    AND sender_agent_id = ${sender.id} AND subject = 'Schema review'`;
+  expect(source).toHaveLength(1);
+  expect(source[0]?.body).toBe("Review the schema.");
+  const hidden = await rpc("GetTask", { id: randomUUID() });
+  expect(hidden.body.error.code).toBe(-32001);
+  const wrongVersion = await rpc("GetTask", { id: task.id }, token, "0.3");
+  expect(wrongVersion.body.error.code).toBe(-32009);
+  const foreignToken = (await exchangePairingCode(sql, await createPairingCode(sql, alphaId,
+    (await createAgent(sql, alphaId, ownerId, { handle: `foreign-${randomUUID().slice(0, 8)}`, hostType: "codex", role: "Foreign", scopes: [] })).id, ownerId))).token;
+  expect((await rpc("GetTask", { id: task.id }, foreignToken)).body.error.code).toBe(-32001);
+  await sendAgentMessage(sql, { agentId: target.id, organizationId: workspaceId }, {
+    to: sender.handle, type: "fyi", subject: "Schema reviewed", body: "The schema is ready.",
+    threadId: String(source[0]!.thread_id), replyTo: String(source[0]!.id), clientMessageId: randomUUID(),
+  });
+  const completed = await rpc("GetTask", { id: task.id, historyLength: 0 });
+  expect(completed.body.result.status.state).toBe("TASK_STATE_COMPLETED");
+  expect(completed.body.result.history ?? []).toEqual([]);
+  expect(completed.body.result.artifacts[0].parts[0].text).toBe("The schema is ready.");
+  expect((await rpc("SendMessage", { message: { ...request.message, messageId: "external-followup",
+    taskId: task.id, contextId: task.contextId } })).body.error.code).toBe(-32004);
+  const pending = await rpc("SendMessage", { message: { ...request.message, messageId: "external-message-2",
+    contextId: task.contextId, metadata: { subject: "Another review" } } });
+  const pendingTask = pending.body.result.task;
+  expect(pendingTask.contextId).toBe(task.contextId);
+  const followup = await rpc("SendMessage", { message: { ...request.message,
+    messageId: "external-message-3", taskId: pendingTask.id, metadata: { subject: "More detail" } } });
+  expect(followup.body.result.task.id).toBe(pendingTask.id);
+  const listed = await rpc("ListTasks", { contextId: task.contextId, pageSize: 1 });
+  expect(listed.body.result.totalSize).toBe(2);
+  expect(listed.body.result.tasks).toHaveLength(1);
+  expect(listed.body.result.nextPageToken).toBeTruthy();
+  const nextPage = await rpc("ListTasks", { contextId: task.contextId, pageSize: 1,
+    pageToken: listed.body.result.nextPageToken });
+  expect(nextPage.body.result.tasks).toHaveLength(1);
+  expect(nextPage.body.result.nextPageToken).toBe("");
+  const canceled = await rpc("CancelTask", { id: pending.body.result.task.id });
+  expect(canceled.body.result.status.state).toBe("TASK_STATE_CANCELED");
+  const denied = await rpc("GetTask", { id: task.id }, "invalid-token");
+  expect(denied.status).toBe(401);
+}, 60_000);
+
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });
   const code = await createPairingCode(sql, alphaId, created.id, ownerId);

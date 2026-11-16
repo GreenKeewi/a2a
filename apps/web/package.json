@@ -8,9 +8,11 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc -p tsconfig.json",
-    "test:db": "vitest run src/lib"
+    "test:db": "vitest run src/lib",
+    "test:a2a-tck": "tsx scripts/a2a-tck.ts"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
     "@a2a/protocol": "workspace:*",
     "@better-auth/drizzle-adapter": "1.7.25",
     "@supabase/supabase-js": "2.119.0",
