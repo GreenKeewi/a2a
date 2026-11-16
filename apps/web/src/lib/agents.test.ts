@@ -209,6 +209,7 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   const token = (await exchangePairingCode(sql, await createPairingCode(sql, workspaceId, sender.id, ownerId))).token;
   const cardRoute = await import("../app/api/a2a/agents/[handle]/card/route");
   const rpcRoute = await import("../app/api/a2a/agents/[handle]/rpc/route");
+  const gatewayRoute = await import("../app/api/a2a/rpc/route");
   const genericRoute = await import("../app/.well-known/agent-card.json/route");
   const card = await cardRoute.GET(new Request("http://127.0.0.1:4300/api/a2a/agents/a2a-target/card",
     { headers: { authorization: `Bearer ${token}` } }), { params: Promise.resolve({ handle: target.handle }) });
@@ -234,7 +235,7 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   expect(first.status).toBe(200);
   expect(first.body.error).toBeUndefined();
   const task = first.body.result.task;
-  expect(task.status.state).toBe("TASK_STATE_INPUT_REQUIRED");
+  expect(task.status.state).toBe("TASK_STATE_SUBMITTED");
   expect(task.contextId).toBeTruthy();
   const duplicate = await rpc("SendMessage", request);
   expect(duplicate.body.result.task.id).toBe(task.id);
@@ -242,6 +243,8 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
     AND sender_agent_id = ${sender.id} AND subject = 'Schema review'`;
   expect(source).toHaveLength(1);
   expect(source[0]?.body).toBe("Review the schema.");
+  await readAgentMessage(sql, { agentId: target.id, organizationId: workspaceId }, String(source[0]!.id));
+  expect((await rpc("GetTask", { id: task.id })).body.result.status.state).toBe("TASK_STATE_WORKING");
   const hidden = await rpc("GetTask", { id: randomUUID() });
   expect(hidden.body.error.code).toBe(-32001);
   const wrongVersion = await rpc("GetTask", { id: task.id }, token, "0.3");
@@ -276,9 +279,37 @@ it("bridges authenticated A2A 1.0 messages to durable tasks and exact agent repl
   expect(nextPage.body.result.nextPageToken).toBe("");
   const canceled = await rpc("CancelTask", { id: pending.body.result.task.id });
   expect(canceled.body.result.status.state).toBe("TASK_STATE_CANCELED");
+  const canceledMessages = await sql`SELECT m.response_state FROM a2a_task_messages tm JOIN messages m ON m.id = tm.message_id
+    WHERE tm.task_id = ${pendingTask.id}`;
+  expect(canceledMessages.map((row) => row.response_state)).toEqual(["cancelled", "cancelled"]);
+  const longBody = "Please inspect the migration and verify the workspace isolation rules in detail. ".repeat(2);
+  const genericPayload = JSON.stringify({ jsonrpc: "2.0", id: "generic", method: "SendMessage", params: {
+      message: { messageId: "long-plain-text", role: "ROLE_USER", parts: [{ text: longBody }],
+        metadata: { to: target.handle } }, configuration: { returnImmediately: true },
+    } });
+  const genericRequest = () => new Request("http://127.0.0.1:4300/api/a2a/rpc", {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "a2a-version": "1.0" },
+    body: genericPayload,
+  });
+  const genericResponse = await gatewayRoute.POST(genericRequest());
+  const genericTask = (await genericResponse.json()).result.task;
+  expect(genericTask.status.state).toBe("TASK_STATE_SUBMITTED");
+  const longSubject = await sql`SELECT id, thread_id, subject FROM messages WHERE organization_id = ${workspaceId} AND body = ${longBody.trim()}`;
+  expect(String(longSubject[0]?.subject).length).toBeLessThanOrEqual(80);
+  expect(longSubject[0]?.subject).toBe(`${longBody.slice(0, 79).trimEnd()}…`);
+  const collision = await rpc("SendMessage", { message: { ...request.message,
+    messageId: "long-plain-text", taskId: pendingTask.id, metadata: { subject: "Other", to: target.handle } } });
+  expect(collision.body.error.code).toBe(-32602);
+  await sendAgentMessage(sql, { agentId: target.id, organizationId: workspaceId }, {
+    to: sender.handle, type: "fyi", subject: "Long request answered", body: "Completed once.",
+    threadId: String(longSubject[0]!.thread_id), replyTo: String(longSubject[0]!.id), clientMessageId: randomUUID(),
+  });
+  const replayed = await gatewayRoute.POST(genericRequest());
+  expect((await replayed.json()).result.task).toMatchObject({ id: genericTask.id,
+    status: { state: "TASK_STATE_COMPLETED" } });
   const denied = await rpc("GetTask", { id: task.id }, "invalid-token");
   expect(denied.status).toBe(401);
-}, 60_000);
+}, 90_000);
 
 it("exchanges a pairing code once and revokes its token immediately", async () => {
   const created = await createAgent(sql, alphaId, ownerId, { handle: "codex-api", hostType: "codex", role: "API", scopes: ["apps/api/**"] });

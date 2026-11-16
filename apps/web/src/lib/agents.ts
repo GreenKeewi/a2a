@@ -260,13 +260,14 @@ async function senderUnreadCount(sql: Sql, agentId: string) {
   return Number(rows[0]?.count ?? 0);
 }
 
-export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, input: SendRequest) {
+export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, input: SendRequest,
+  withinTransaction = false) {
   const parsed = sendRequestSchema.safeParse(input);
   if (!parsed.success) throw new AgentError("INVALID_REQUEST");
   const existing = await previousSend(sql, principal.agentId, parsed.data.clientMessageId);
   if (existing) return { ...existing, senderUnreadCount: await senderUnreadCount(sql, principal.agentId) };
   try {
-    const sent = await sql.begin(async (tx) => {
+    const performSend = async (tx: Sql) => {
       const sender = await tx`SELECT id FROM agents WHERE id = ${principal.agentId} AND organization_id = ${principal.organizationId} AND revoked_at IS NULL`;
       if (!sender.length) throw new AgentError("UNAUTHENTICATED");
       const active = await tx`SELECT id, handle, scopes FROM agents WHERE organization_id = ${principal.organizationId} AND revoked_at IS NULL`;
@@ -338,7 +339,9 @@ export async function sendAgentMessage(sql: Sql, principal: AgentPrincipal, inpu
       }
       await tx`UPDATE threads SET last_message_at = now() WHERE id = ${threadId}`;
       return { messageId, threadId, recipientHandles: toHuman ? ["human"] : recipients.map((recipient) => recipient.handle).sort() };
-    });
+    };
+    const sent = withinTransaction ? await performSend(sql) :
+      await sql.begin((tx) => performSend(tx as unknown as Sql));
     return { ...sent, senderUnreadCount: await senderUnreadCount(sql, principal.agentId) };
   } catch (error) {
     if (typeof error === "object" && error && "code" in error && error.code === "23505") {

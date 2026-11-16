@@ -70,6 +70,7 @@ test.each(["codex", "claude-code"] as const)("%s installer preserves existing se
     expect(hooks.hooks.Stop[1].hooks[0].timeout).toBe(2);
     const instructions = await readFile(join(root, host === "codex" ? "AGENTS.md" : "CLAUDE.md"), "utf8");
     expect(instructions.match(/a2a managed instructions start/g)).toHaveLength(1);
+    expect(instructions).toContain("replyTo");
     if (host === "codex") {
       const parsed = parseToml(await readFile(join(root, ".codex", "config.toml"), "utf8"));
       expect(parsed.model).toBe("test");

@@ -52,7 +52,9 @@ function messageBody(message: Message) {
 
 function subjectFor(message: Message, body: string) {
   const supplied = message.metadata?.subject;
-  const subject = typeof supplied === "string" ? supplied.trim() : body.split(/\r?\n/, 1)[0]!.trim();
+  const firstLine = body.split(/\r?\n/, 1)[0]!.trim();
+  const subject = typeof supplied === "string" ? supplied.trim() :
+    firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine;
   if (!subject || subject.length > 80 || /[\x00-\x1f\x7f]/.test(subject)) throw new RequestMalformedError();
   return subject;
 }
@@ -127,9 +129,14 @@ export class A2ABridgeHandler implements A2ARequestHandler {
     if (!uuidPattern.test(id)) throw new TaskNotFoundError();
     const rows = await this.sql`
       SELECT t.id, t.context_id, t.thread_id, t.initial_message_id, t.client_agent_id, t.target_agent_id,
-        t.created_at, t.canceled_at, target.handle AS target_handle,
+        t.created_at, t.canceled_at, target.handle AS target_handle, read_receipt.read_at,
         reply.id AS reply_id, reply.body AS reply_body, reply.subject AS reply_subject, reply.created_at AS reply_at
       FROM a2a_tasks t JOIN agents target ON target.id = t.target_agent_id
+      LEFT JOIN LATERAL (
+        SELECT min(r.read_at) AS read_at FROM a2a_task_messages tm
+        JOIN message_recipients r ON r.message_id = tm.message_id AND r.agent_id = t.target_agent_id
+        WHERE tm.task_id = t.id
+      ) read_receipt ON true
       LEFT JOIN LATERAL (
         SELECT m.id, m.body, m.subject, m.created_at
         FROM a2a_task_messages tm JOIN messages m ON m.reply_to_message_id = tm.message_id
@@ -157,11 +164,11 @@ export class A2ABridgeHandler implements A2ARequestHandler {
     if (row.reply_id) history.push(protocolMessage(String(row.reply_id), contextId, id, Role.ROLE_AGENT,
       String(row.reply_body), String(row.reply_subject)));
     const state = row.canceled_at ? TaskState.TASK_STATE_CANCELED : row.reply_id ? TaskState.TASK_STATE_COMPLETED :
-      TaskState.TASK_STATE_INPUT_REQUIRED;
-    const timestamp = row.canceled_at ?? row.reply_at ?? row.created_at;
+      row.read_at ? TaskState.TASK_STATE_WORKING : TaskState.TASK_STATE_SUBMITTED;
+    const timestamp = row.canceled_at ?? row.reply_at ?? row.read_at ?? row.created_at;
     const boundedHistory = historyLength === undefined ? history : historyLength <= 0 ? [] : history.slice(-Math.min(historyLength, 100));
     return { id, contextId, status: { state, message: row.reply_id && !row.canceled_at ? history.at(-1) : undefined,
-      timestamp: new Date(String(timestamp)).toISOString() },
+      timestamp: timestamp instanceof Date ? timestamp.toISOString() : new Date(String(timestamp)).toISOString() },
       artifacts: row.reply_id && !row.canceled_at ? [{ artifactId: String(row.reply_id), name: "Agent reply",
         description: "Reply from the destination agent", parts: [textPart(String(row.reply_body))], metadata: undefined, extensions: [] }] : [],
       history: boundedHistory, metadata: { destination: String(row.target_handle) } };
@@ -175,6 +182,21 @@ export class A2ABridgeHandler implements A2ARequestHandler {
         !params.configuration.acceptedOutputModes.includes("text/plain")) throw new ContentTypeNotSupportedError();
     const body = messageBody(message);
     const subject = subjectFor(message, body);
+    const replay = await this.sql`SELECT t.id, t.context_id, target.normalized_handle, m.body, m.subject
+      FROM a2a_task_messages tm JOIN a2a_tasks t ON t.id = tm.task_id
+      JOIN agents target ON target.id = t.target_agent_id JOIN messages m ON m.id = tm.message_id
+      WHERE t.organization_id = ${this.principal.organizationId} AND t.client_agent_id = ${this.principal.agentId}
+        AND tm.external_message_id = ${message.messageId} LIMIT 2`;
+    if (replay.length > 1) throw new RequestMalformedError();
+    if (replay[0]) {
+      const bound = replay[0];
+      if ((message.taskId && message.taskId !== String(bound.id)) ||
+          (message.contextId && message.contextId !== String(bound.context_id)) ||
+          (this.fixedTarget && this.fixedTarget.toLowerCase() !== String(bound.normalized_handle)) ||
+          (message.metadata?.to && String(message.metadata.to).toLowerCase() !== String(bound.normalized_handle)) ||
+          body !== String(bound.body) || subject !== String(bound.subject)) throw new RequestMalformedError();
+      return this.materialize(await this.taskRow(String(bound.id)), params.configuration?.historyLength);
+    }
     const existingTask = message.taskId ? await this.taskRow(message.taskId) : undefined;
     const target = await this.targetFor(message, existingTask ? String(existingTask.target_handle) : undefined);
     let threadId: string | undefined;
@@ -195,21 +217,39 @@ export class A2ABridgeHandler implements A2ARequestHandler {
         if (found[0]) threadId = String(found[0].thread_id);
       }
     }
-    let sent;
-    try {
-      sent = await sendAgentMessage(this.sql, this.principal, { to: target.handle, type: typeFor(message), subject, body,
-        clientMessageId: deterministicUuid(this.principal.agentId, message.messageId), ...(threadId ? { threadId } : {}) });
-    } catch (error) {
-      if (error instanceof AgentError && error.code === "INVALID_REQUEST") throw new RequestMalformedError();
-      if (error instanceof AgentError && (error.code === "NOT_FOUND" || error.code === "INVALID_ROUTE")) throw new TaskNotFoundError();
-      throw error;
-    }
+    const submit = async (db: Sql, withinTransaction = false) => {
+      try {
+        return await sendAgentMessage(db, this.principal, { to: target.handle, type: typeFor(message), subject, body,
+          clientMessageId: deterministicUuid(this.principal.agentId, message.messageId), ...(threadId ? { threadId } : {}) },
+        withinTransaction);
+      } catch (error) {
+        if (error instanceof AgentError && error.code === "INVALID_REQUEST") throw new RequestMalformedError();
+        if (error instanceof AgentError && (error.code === "NOT_FOUND" || error.code === "INVALID_ROUTE")) throw new TaskNotFoundError();
+        throw error;
+      }
+    };
     if (existingTask) {
-      await this.sql`INSERT INTO a2a_task_messages (task_id, message_id, external_message_id)
-        VALUES (${String(existingTask.id)}, ${sent.messageId}, ${message.messageId}) ON CONFLICT (message_id) DO NOTHING`;
-      return this.materialize(await waitForAgentReply(() => this.taskRow(String(existingTask.id)),
+      const existingTaskId = String(existingTask.id);
+      await this.sql.begin(async (tx) => {
+        const locked = await tx`SELECT canceled_at FROM a2a_tasks WHERE id = ${existingTaskId}
+          AND organization_id = ${this.principal.organizationId} AND client_agent_id = ${this.principal.agentId}
+          FOR UPDATE`;
+        if (!locked[0] || locked[0].canceled_at) throw new UnsupportedOperationError();
+        const reply = await tx`SELECT 1 FROM a2a_task_messages tm JOIN messages m ON m.reply_to_message_id = tm.message_id
+          JOIN message_recipients r ON r.message_id = m.id AND r.agent_id = ${this.principal.agentId}
+          WHERE tm.task_id = ${existingTaskId} AND m.organization_id = ${this.principal.organizationId}
+            AND m.thread_id = ${String(existingTask.thread_id)} AND m.sender_agent_id = ${target.id} LIMIT 1`;
+        if (reply.length) throw new UnsupportedOperationError();
+        const sent = await submit(tx as unknown as Sql, true);
+        const priorBinding = await tx`SELECT task_id FROM a2a_task_messages WHERE message_id = ${sent.messageId}`;
+        if (priorBinding[0] && String(priorBinding[0].task_id) !== existingTaskId) throw new RequestMalformedError();
+        await tx`INSERT INTO a2a_task_messages (task_id, message_id, external_message_id)
+          VALUES (${existingTaskId}, ${sent.messageId}, ${message.messageId}) ON CONFLICT (message_id) DO NOTHING`;
+      });
+      return this.materialize(await waitForAgentReply(() => this.taskRow(existingTaskId),
         params.configuration?.returnImmediately), params.configuration?.historyLength);
     }
+    const sent = await submit(this.sql);
     const taskId = randomUUID();
     await this.sql`INSERT INTO a2a_tasks
       (id, organization_id, client_agent_id, target_agent_id, context_id, thread_id, initial_message_id)
@@ -241,11 +281,17 @@ export class A2ABridgeHandler implements A2ARequestHandler {
     const state = params.status === TaskState.TASK_STATE_UNSPECIFIED ? null : params.status;
     const rows = await this.sql`
       WITH visible AS (
-        SELECT t.id, t.created_at, coalesce(t.canceled_at, reply.reply_at, t.created_at) AS status_at,
+        SELECT t.id, t.created_at, coalesce(t.canceled_at, reply.reply_at, read_receipt.read_at, t.created_at) AS status_at,
           CASE WHEN t.canceled_at IS NOT NULL THEN ${TaskState.TASK_STATE_CANCELED}
                WHEN reply.reply_at IS NOT NULL THEN ${TaskState.TASK_STATE_COMPLETED}
-               ELSE ${TaskState.TASK_STATE_INPUT_REQUIRED} END AS state
+               WHEN read_receipt.read_at IS NOT NULL THEN ${TaskState.TASK_STATE_WORKING}
+               ELSE ${TaskState.TASK_STATE_SUBMITTED} END AS state
         FROM a2a_tasks t JOIN agents target ON target.id = t.target_agent_id
+        LEFT JOIN LATERAL (
+          SELECT min(r.read_at) AS read_at FROM a2a_task_messages tm
+          JOIN message_recipients r ON r.message_id = tm.message_id AND r.agent_id = t.target_agent_id
+          WHERE tm.task_id = t.id
+        ) read_receipt ON true
         LEFT JOIN LATERAL (
           SELECT m.created_at AS reply_at FROM a2a_task_messages tm
           JOIN messages m ON m.reply_to_message_id = tm.message_id
@@ -279,12 +325,19 @@ export class A2ABridgeHandler implements A2ARequestHandler {
     const before = await this.taskRow(params.id);
     if (before.canceled_at || before.reply_id) throw new TaskNotCancelableError();
     await this.sql.begin(async (tx) => {
-      await tx`UPDATE a2a_tasks SET canceled_at = now() WHERE id = ${params.id}
+      const changed = await tx`UPDATE a2a_tasks t SET canceled_at = now() WHERE t.id = ${params.id}
         AND organization_id = ${this.principal.organizationId} AND client_agent_id = ${this.principal.agentId}
-        AND canceled_at IS NULL`;
-      await tx`UPDATE messages SET response_state = 'cancelled', resolved_by_agent_id = ${this.principal.agentId}, resolved_at = now()
-        WHERE id = ${String(before.initial_message_id)} AND organization_id = ${this.principal.organizationId}
-          AND sender_agent_id = ${this.principal.agentId} AND response_state = 'open'`;
+        AND canceled_at IS NULL AND NOT EXISTS (
+          SELECT 1 FROM a2a_task_messages tm JOIN messages reply ON reply.reply_to_message_id = tm.message_id
+          JOIN message_recipients r ON r.message_id = reply.id AND r.agent_id = t.client_agent_id
+          WHERE tm.task_id = t.id AND reply.organization_id = t.organization_id
+            AND reply.thread_id = t.thread_id AND reply.sender_agent_id = t.target_agent_id
+        ) RETURNING t.id`;
+      if (!changed.length) throw new TaskNotCancelableError();
+      await tx`UPDATE messages m SET response_state = 'cancelled', resolved_by_agent_id = ${this.principal.agentId}, resolved_at = now()
+        FROM a2a_task_messages tm WHERE tm.message_id = m.id AND tm.task_id = ${params.id}
+          AND m.organization_id = ${this.principal.organizationId} AND m.sender_agent_id = ${this.principal.agentId}
+          AND m.response_state = 'open'`;
     });
     return this.materialize(await this.taskRow(params.id));
   }

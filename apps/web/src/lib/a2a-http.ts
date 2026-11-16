@@ -1,10 +1,12 @@
 import { AgentCard } from "@a2a-js/sdk";
 import { JsonRpcTransportHandler, ServerCallContext } from "@a2a-js/sdk/server";
+import { after } from "next/server";
 
 import { AgentError } from "./agents";
 import { A2ABridgeHandler, makeAgentCard } from "./a2a-bridge";
 import { sql } from "./db";
 import { requireAgent } from "./http";
+import { runSmartJobs } from "./smart-worker";
 
 function baseUrl() {
   const base = process.env.BETTER_AUTH_URL;
@@ -69,6 +71,14 @@ export async function a2aRpcResponse(request: Request, fixedTarget?: string) {
   if ((result.error as { code?: number } | undefined)?.code === -32603) {
     return Response.json({ jsonrpc: "2.0", id: result.id, error: { code: -32603, message: "Internal error" } },
       { headers: { "cache-control": "no-store" } });
+  }
+  if (!result.error && process.env.A2A_TRIAGE_MODEL) {
+    try {
+      const payload: unknown = JSON.parse(body);
+      if (payload && typeof payload === "object" && "method" in payload && payload.method === "SendMessage") {
+        after(() => runSmartJobs(sql).then(() => {}).catch(() => {}));
+      }
+    } catch { /* The SDK has already handled malformed JSON. */ }
   }
   return Response.json(result, { headers: { "cache-control": "no-store" } });
 }

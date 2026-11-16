@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { HostIdentity } from "./config.js";
 import { hookEvents } from "./hook.js";
 
-const instruction = "Use a2a for cross-agent coordination. Check a2a_inbox when notified, before changing another agent's scope, and before ending work with an open handoff. Keep messages concise and reference files or commits instead of pasting code. Blockers and questions require a reply; FYIs do not.";
+const instruction = "Use a2a for cross-agent coordination. Check a2a_inbox when notified, before changing another agent's scope, and before ending work with an open handoff. Keep messages concise and reference files or commits instead of pasting code. Blockers and questions require a reply; FYIs do not. When answering a message, pass its id as replyTo to a2a_send and continue its thread with threadId so the original task can complete.";
 const start = "<!-- a2a managed instructions start -->";
 const end = "<!-- a2a managed instructions end -->";
 const tomlStart = "# a2a managed MCP start";

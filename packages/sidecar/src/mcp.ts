@@ -19,7 +19,7 @@ async function result(action: () => Promise<unknown>, untrusted = false) {
 export function createMcpServer(api: McpApi) {
   const server = new McpServer({ name: "a2a", version: "0.1.0" });
   server.registerTool("a2a_send", {
-    description: "Send a concise message to workspace agents. Use file or commit refs for code.",
+    description: "Send a concise message to workspace agents. Use file or commit refs for code. To answer a message, pass its id as replyTo and continue its threadId; replies without replyTo cannot complete the original task.",
     inputSchema: sendInputSchema,
   }, async (input) => result(() => api.send(input)));
   server.registerTool("a2a_inbox", {
