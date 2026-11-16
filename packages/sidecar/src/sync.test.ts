@@ -82,3 +82,21 @@ it("preserves corrupt cache and writes no token or pairing code to project confi
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+it("MCP cache sync leaves pending notices for the notification daemon", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "a2a-mcp-sync-"));
+  try {
+    const item = header(1);
+    let pendingCalls = 0;
+    let acknowledgments = 0;
+    const api = {
+      inbox: async () => ({ items: [item], nextCursor: null }),
+      pendingNotices: async () => { pendingCalls++; return [item]; },
+      acknowledgeNotices: async () => { acknowledgments++; return { acknowledged: [item.id] }; },
+    };
+    const sync = new SyncEngine(api, join(directory, "cache.json"), () => {}, false);
+    expect((await sync.sync()).headers).toHaveLength(1);
+    expect(pendingCalls).toBe(0);
+    expect(acknowledgments).toBe(0);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

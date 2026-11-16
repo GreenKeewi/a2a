@@ -15,7 +15,8 @@ export class SyncEngine {
   private pending = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly api: SyncApi, private readonly cachePath: string,
-    private readonly onNotice: (header: InboxHeader, latencyMs: number) => void = () => {}) {}
+    private readonly onNotice: (header: InboxHeader, latencyMs: number) => void = () => {},
+    private readonly drainNotices = true) {}
 
   async cache() { return readCache(this.cachePath); }
 
@@ -49,7 +50,7 @@ export class SyncEngine {
 
   private async run(): Promise<SidecarCache> {
     // Drain urgent notices first; refreshing 100 cached headers must not delay them.
-    for (;;) {
+    for (; this.drainNotices;) {
       const pending = await this.api.pendingNotices();
       if (!pending.length) break;
       for (const item of pending) this.onNotice(item, Math.max(0, Date.now() - new Date(item.createdAt).getTime()));

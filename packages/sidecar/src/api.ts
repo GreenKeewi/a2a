@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+
+import { type AgentsInput, type InboxInput, type ReadInput, type SendInput } from "@a2a/protocol";
 import { z } from "zod";
 
 import { headerSchema, type InboxHeader } from "./cache.js";
@@ -36,8 +39,11 @@ export async function pairAgent(apiUrl: string, code: string, hostType: "claude-
 
 export class AgentApi {
   constructor(private readonly config: AgentConnection, private readonly token: string) {}
-  private call<T>(path: string, schema: z.ZodType<T>, method = "GET") {
-    return request(new URL(path, this.config.apiUrl).toString(), schema, { method, headers: { authorization: `Bearer ${this.token}` } });
+  private call<T>(path: string, schema: z.ZodType<T>, method = "GET", body?: unknown) {
+    return request(new URL(path, this.config.apiUrl).toString(), schema, { method,
+      headers: { authorization: `Bearer ${this.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
   }
   realtimeToken() { return this.call("/api/agents/realtime-token", realtimeSchema, "POST"); }
   heartbeat() { return this.call("/api/agents/heartbeat", z.strictObject({ online: z.boolean() }), "POST"); }
@@ -48,15 +54,32 @@ export class AgentApi {
       method: "POST", headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" }, body: JSON.stringify({ ids }),
     });
   }
-  inbox(options: { cursor?: string; includeBriefing?: boolean; unreadOnly?: boolean; limit?: number } = {}) {
+  inbox(options: Partial<InboxInput> = {}) {
     const url = new URL("/api/agents/inbox", this.config.apiUrl);
-    url.searchParams.set("unreadOnly", String(options.unreadOnly ?? false));
-    url.searchParams.set("limit", String(options.limit ?? 25));
+    url.searchParams.set("unreadOnly", String(options.unreadOnly ?? true));
+    url.searchParams.set("limit", String(options.limit ?? 10));
     if (options.cursor) url.searchParams.set("cursor", options.cursor);
     if (options.includeBriefing) url.searchParams.set("includeBriefing", "true");
+    if (options.query) url.searchParams.set("query", options.query);
+    for (const type of options.types ?? []) url.searchParams.append("type", type);
     return request(url.toString(), inboxSchema, { method: "GET", headers: { authorization: `Bearer ${this.token}` } }) as Promise<{
       items: InboxHeader[]; nextCursor: string | null; briefing?: unknown;
     }>;
   }
   briefing() { return this.call("/api/agents/briefing", z.unknown()); }
+  send(input: SendInput) {
+    return this.call("/api/agents/messages", z.strictObject({ messageId: z.uuid(), threadId: z.uuid(),
+      recipientHandles: z.array(z.string()), senderUnreadCount: z.number().int().nonnegative() }), "POST",
+      { ...input, clientMessageId: randomUUID() });
+  }
+  read(input: ReadInput) {
+    const path = input.mode === "thread" ? `/api/agents/threads/${input.threadId}` : `/api/agents/messages/${input.messageId}`;
+    return this.call(path, z.unknown());
+  }
+  agents(input: AgentsInput) {
+    const url = new URL("/api/agents/directory", this.config.apiUrl);
+    if (input.onlineOnly) url.searchParams.set("onlineOnly", "true");
+    if (input.scope) url.searchParams.set("scope", input.scope);
+    return request(url.toString(), z.unknown(), { method: "GET", headers: { authorization: `Bearer ${this.token}` } });
+  }
 }

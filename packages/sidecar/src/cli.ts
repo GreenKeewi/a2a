@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 import { rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
 import { AgentApi, ApiError, pairAgent } from "./api.js";
 import { findConfig, findHostIdentity, OsCredentialStore, saveConfig, saveHostIdentity, userCachePath,
   type AgentConnection, type HostIdentity, type SidecarConfig } from "./config.js";
 import { RealtimeSession } from "./realtime.js";
+import { createMcpServer } from "./mcp.js";
 import { SyncEngine } from "./sync.js";
+import { evaluateHook, hookEvents } from "./hook.js";
+import { hostInstallStatus, installHost, uninstallHost } from "./install.js";
 
 async function readPairingCode(): Promise<string> {
   if (!process.stdin.isTTY) {
@@ -72,17 +78,45 @@ async function init() {
   catch (error) { await new AgentApi(connection, paired.token).revoke(); throw error; }
   await credentials.set(connection, paired.token);
   await saveHostIdentity(process.cwd(), { hostType, agentId: paired.agentId });
+  const installed = await installHost(process.cwd(), hostType, fileURLToPath(import.meta.url));
   process.stdout.write(`Paired ${hostType} agent ${paired.agentId}. Public project config saved in .a2a/config.json.\n`);
+  process.stdout.write(`Installed ${installed.files.join(", ")}.\n`);
+}
+
+async function install() {
+  const { path } = await findConfig();
+  await findHostIdentity(dirname(dirname(path)), hostArgument());
+  const installed = await installHost(dirname(dirname(path)), hostArgument(), fileURLToPath(import.meta.url));
+  process.stdout.write(`Installed ${installed.files.join(", ")}.\n`);
+}
+
+async function hook() {
+  const event = argument("--event");
+  if (!hookEvents.some((candidate) => candidate === event)) throw new Error("Unknown hook event");
+  let raw = "";
+  for await (const chunk of process.stdin) {
+    raw += chunk.toString();
+    if (raw.length > 65536) throw new Error("Hook input too large");
+  }
+  const config = await currentConnection();
+  const output = await evaluateHook(event as (typeof hookEvents)[number], JSON.parse(raw || "{}"), userCachePath(config.agentId));
+  process.stdout.write(`${JSON.stringify(output)}\n`);
 }
 
 async function status() {
   const config = await currentConnection();
+  const { path } = await findConfig();
+  const installed = await hostInstallStatus(dirname(dirname(path)), config.hostType);
   const credentials = new OsCredentialStore();
   const token = await credentials.get(config);
   const api = new AgentApi(config, token);
-  await api.heartbeat();
   const cache = await new SyncEngine(api, userCachePath(config.agentId)).cache();
-  process.stdout.write(`Agent ${config.agentId}: authenticated; ${cache.connection}; ${cache.headers.length} cached headers.\n`);
+  let remote = "unreachable";
+  try { await api.heartbeat(); remote = "authenticated"; }
+  catch (error) { if (error instanceof ApiError && error.code === "UNAUTHENTICATED") remote = "revoked"; }
+  process.stdout.write(`Agent ${config.agentId}: ${remote}; ${cache.connection}; ${cache.headers.length} cached headers; MCP ${installed.mcpInstalled ? "installed" : "missing"}; hooks ${installed.hooksInstalled ? "installed" : "missing"}.\n`);
+  if (config.hostType === "codex") process.stdout.write(installed.hooksExplicitlyDisabled
+    ? "Codex hooks are disabled in project config.\n" : "Review and trust project hooks in Codex /hooks before use.\n");
 }
 
 async function logout() {
@@ -94,6 +128,8 @@ async function logout() {
   catch (error) { remoteError = error; }
   await credentials.delete(config);
   await rm(userCachePath(config.agentId), { force: true });
+  const { path } = await findConfig();
+  await uninstallHost(dirname(dirname(path)), config.hostType, fileURLToPath(import.meta.url));
   if (remoteError && !(remoteError instanceof ApiError && remoteError.code === "UNAUTHENTICATED")) throw remoteError;
   process.stdout.write("Agent token revoked and local credential removed.\n");
 }
@@ -115,13 +151,46 @@ async function daemon() {
   process.once("SIGTERM", stop);
 }
 
+async function mcp() {
+  let config: AgentConnection | null = null;
+  let token: string | null = null;
+  try { config = await currentConnection(); token = await new OsCredentialStore().get(config); }
+  catch { /* Keep the MCP interface available with a safe authentication error. */ }
+  const unavailable = async (): Promise<never> => { throw new ApiError("UNAUTHENTICATED", 401); };
+  const api = config && token ? new AgentApi(config, token) :
+    { send: unavailable, inbox: unavailable, read: unavailable, agents: unavailable };
+  // The protocol server must be ready even while the network is unavailable.
+  const handle = serveStdio(() => createMcpServer(api));
+  const sync = config && token ? new SyncEngine(new AgentApi(config, token), userCachePath(config.agentId), () => {}, false) : null;
+  const session = config && token && sync ? new RealtimeSession(config, new AgentApi(config, token), sync) : null;
+  if (session) void session.start().catch(() => {});
+  let closing = false;
+  const stop = () => {
+    if (closing) return;
+    closing = true;
+    const fallback = setTimeout(() => process.exit(0), 2_000);
+    void Promise.allSettled([handle.close(), session?.stop() ?? Promise.resolve()]).then(() => {
+      clearTimeout(fallback);
+      process.exit(0);
+    });
+  };
+  process.stdin.once("end", stop);
+  process.stdin.once("close", stop);
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  if (process.stdin.readableEnded || process.stdin.destroyed) stop();
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === "init") await init();
   else if (command === "status") await status();
   else if (command === "logout") await logout();
   else if (command === "daemon") await daemon();
-  else process.stdout.write("Usage: a2a <init --host HOST --url URL | status --host HOST | logout --host HOST | daemon --host HOST>\n");
+  else if (command === "mcp") await mcp();
+  else if (command === "install") await install();
+  else if (command === "hook") await hook();
+  else process.stdout.write("Usage: a2a <init --host HOST --url URL | install --host HOST | status --host HOST | logout --host HOST | daemon --host HOST | mcp --host HOST | hook --host HOST --event EVENT>\n");
 }
 
 main().catch((error: unknown) => {
