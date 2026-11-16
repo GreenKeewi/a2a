@@ -78,7 +78,7 @@ export async function createPairingCode(sql: Sql, organizationId: string, agentI
       JOIN member m ON m.organization_id = a.organization_id
       WHERE a.id = ${agentId} AND a.organization_id = ${organizationId} AND a.revoked_at IS NULL AND m.user_id = ${userId}
         AND (a.created_by_user_id = ${userId} OR m.role = 'owner')
-      FOR SHARE OF a, m
+      FOR UPDATE OF a
     `;
     if (!rows[0]) throw new AgentError("FORBIDDEN");
     await tx`UPDATE agent_pairing_codes SET expires_at = now() WHERE agent_id = ${agentId} AND used_at IS NULL AND expires_at > now()`;
