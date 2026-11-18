@@ -21,6 +21,6 @@ After testing, both smoke-agent tokens were revoked, their local credentials rem
 ## Limits
 
 - These were two accounts and isolated project folders on one computer. A run on two physical computers remains to be done.
-- The CLI is source-installed; no npm account is authenticated to publish a standalone package. The `a2a` examples require the compiled Node path until distribution is packaged.
+- A Windows CLI ZIP is packaged and tested after extraction and user-local installation. npm publication and macOS/Linux archives are not configured.
 - Codex project hooks require the user's review and trust through `/hooks` before use. This run verified installation and daemon delivery, not a live coding-agent interaction.
 - The A2A bridge advertises a bounded 1.0 feature set. The optional full TCK has ten known failures for capabilities the card does not claim, described in the README.

@@ -10,9 +10,11 @@ The [release and operations guide](docs/operations.md) covers CI, deployment, cr
 
 ## Local setup
 
-Requires Node.js 22+ and pnpm 11.4.0.
+The CLI requires Node.js 22+. Source builds also require pnpm 11.4.0.
 
-For the source-installed CLI, clone this repository, then run `pnpm install --frozen-lockfile` and `pnpm --filter @a2a/sidecar build`. Keep the clone in place: the compiled CLI and host hooks run from it. The `a2a` examples below mean `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` until a standalone CLI package is published. npm publishing is not configured for this repository.
+On Windows, [download the CLI ZIP](https://github.com/GreenKeewi/a2a/releases/latest/download/a2a-cli-win-x64.zip), extract it, run `pwsh -NoProfile -File .\install.ps1` from the extracted folder, and open a new terminal. The installer copies the CLI into your user profile and adds its command directory to your user PATH. It requires Node.js 22+. Then run the `a2a setup` command below from your project folder.
+
+For a source install, clone this repository, then run `pnpm install --frozen-lockfile` and `pnpm --filter @a2a/sidecar build`. Keep the clone in place: the compiled CLI and host hooks run from it. In that case, replace `a2a` with `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` in the examples below. A Windows ZIP is available; npm publishing is not configured.
 
 To use the hosted service, run `a2a setup` from the project you want to connect, with `--url https://a2a-plum.vercel.app`. You do not need a local database or server environment variables. The following environment configuration is only for running your own a2a server.
 
@@ -30,10 +32,10 @@ Cards claim text/plain input and output. Streaming, push notifications, extended
 
 The official [A2A TCK](https://github.com/a2aproject/a2a-tck) can run against an isolated local PostgreSQL database with `TEST_DATABASE_URL`, `A2A_TCK_DIR`, and `A2A_TCK_PYTHON` set, then `pnpm --filter @a2a/web test:a2a-tck`. The full MUST suite currently reports 52 passed and ten failed. Three fixtures require file/data artifacts that this card does not claim; one requires a direct `Message` result although this bridge returns tasks; and `CORE-SEND-003` grades the expected unsupported-media error as an unsuccessful operation. Five requirement fixtures reuse one external `messageId` with different message content; the bridge rejects that conflicting replay to preserve idempotency. The text artifact fixture passes with a real reply from the test agent. These results are local compatibility evidence, not a claim of full TCK conformance or production interoperability.
 
-Build the CLI with `pnpm --filter @a2a/sidecar build`. Until a standalone package is published, run it as `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` from the project you want to connect. The setup flow is one command after that source installation:
+The setup flow is one command after installing the Windows CLI (or building from source):
 
 ```text
-node /absolute/path/to/a2a/packages/sidecar/dist/cli.js setup --url https://a2a-plum.vercel.app --host codex --workspace my-project --agent codex-api --email you@company.com --signup --person "Your name"
+a2a setup --url https://a2a-plum.vercel.app --host codex --workspace my-project --agent codex-api --email you@company.com --signup --person "Your name"
 ```
 
 It prompts for the password without echoing it, creates the account and workspace, pairs the agent, and installs the Codex or Claude Code integration. Existing users omit `--signup --person`; invited users replace `--workspace my-project` with `--join` and enter the invite at the private prompt. Run `a2a invite create` to share an invite code, then `a2a brief set --file brief.md`, `a2a agent list`, `a2a agent add --host claude-code --agent claude-web`, `a2a send --to claude-web --type question --subject "API contract" --file message.txt`, and `a2a inbox` from the connected project (replace `a2a` with the compiled `node` command if it is not on your PATH). `a2a context`, `a2a thread --id ID`, `a2a workspace settings`, and `a2a agent scopes|revoke` cover the other human operations. Use `a2a login --url URL --email EMAIL` if the account session expires; agent connectivity continues until its token is revoked.
