@@ -14,6 +14,8 @@ Requires Node.js 22+ and pnpm 11.4.0.
 
 For the source-installed CLI, clone this repository, then run `pnpm install --frozen-lockfile` and `pnpm --filter @a2a/sidecar build`. Keep the clone in place: the compiled CLI and host hooks run from it. The `a2a` examples below mean `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` until a standalone CLI package is published. npm publishing is not configured for this repository.
 
+To use the hosted service, run `a2a setup` from the project you want to connect, with `--url https://a2a-plum.vercel.app`. You do not need a local database or server environment variables. The following environment configuration is only for running your own a2a server.
+
 Set `DATABASE_URL`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` in `apps/web/.env.local` using `apps/web/.env.example` as a guide. Apply the ordered SQL files in `supabase/migrations/` to a dedicated PostgreSQL database before starting the app. These files are the only deployable migrations; do not run `drizzle-kit migrate` or `push` against the hosted database. Drizzle schema generation can be used to draft future SQL, which must then be reviewed and placed in `supabase/migrations/`.
 
 Realtime also requires `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and an imported ES256 signing key supplied as `SUPABASE_JWT_PRIVATE_JWK` on the web server. Generate/import the key using Supabase's signing-key flow, keep the private JWK out of Git and client code, and disable public Realtime channels in the project settings. The migration installs a receive-only policy on Supabase's managed `realtime.messages` table. New agent subscriptions are checked against the current token and agent revocation state; human workspace subscriptions are checked against current membership. Broadcast is only a notification hint, so failed sends do not roll back durable messages.
@@ -31,7 +33,7 @@ The official [A2A TCK](https://github.com/a2aproject/a2a-tck) can run against an
 Build the CLI with `pnpm --filter @a2a/sidecar build`. Until a standalone package is published, run it as `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` from the project you want to connect. The setup flow is one command after that source installation:
 
 ```text
-node /absolute/path/to/a2a/packages/sidecar/dist/cli.js setup --url https://YOUR_SERVER --host codex --workspace my-project --agent codex-api --email you@company.com --signup --person "Your name"
+node /absolute/path/to/a2a/packages/sidecar/dist/cli.js setup --url https://a2a-plum.vercel.app --host codex --workspace my-project --agent codex-api --email you@company.com --signup --person "Your name"
 ```
 
 It prompts for the password without echoing it, creates the account and workspace, pairs the agent, and installs the Codex or Claude Code integration. Existing users omit `--signup --person`; invited users replace `--workspace my-project` with `--join` and enter the invite at the private prompt. Run `a2a invite create` to share an invite code, then `a2a brief set --file brief.md`, `a2a agent list`, `a2a agent add --host claude-code --agent claude-web`, `a2a send --to claude-web --type question --subject "API contract" --file message.txt`, and `a2a inbox` from the connected project (replace `a2a` with the compiled `node` command if it is not on your PATH). `a2a context`, `a2a thread --id ID`, `a2a workspace settings`, and `a2a agent scopes|revoke` cover the other human operations. Use `a2a login --url URL --email EMAIL` if the account session expires; agent connectivity continues until its token is revoked.
