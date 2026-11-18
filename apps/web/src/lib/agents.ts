@@ -23,6 +23,10 @@ export type AgentInput = z.input<typeof agentInputSchema>;
 
 function hash(value: string) { return createHash("sha256").update(value).digest("hex"); }
 
+function timestampIso(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
+}
+
 function base32(bytes: Buffer): string {
   let pending = 0;
   let bits = 0;
@@ -182,7 +186,7 @@ export async function listAgentTokensForHuman(sql: Sql, organizationId: string, 
     WHERE agent_id = ${agentId} AND revoked_at IS NULL ORDER BY created_at DESC
   `;
   return tokens.map((row) => ({ id: String(row.id), displayPrefix: String(row.display_prefix),
-    createdAt: (row.created_at as Date).toISOString(), lastUsedAt: row.last_used_at ? (row.last_used_at as Date).toISOString() : null }));
+    createdAt: timestampIso(row.created_at), lastUsedAt: row.last_used_at ? timestampIso(row.last_used_at) : null }));
 }
 
 export async function revokeAgentTokenForHuman(sql: Sql, organizationId: string, userId: string, agentId: string, tokenId: string) {
@@ -384,7 +388,7 @@ export async function listAgentInbox(sql: Sql, principal: AgentPrincipal, input:
   const items = rows.slice(0, parsed.data.limit).map((row) => ({
     id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
     subject: String(row.subject), senderHandle: String(row.sender_handle),
-    createdAt: (row.created_at as Date).toISOString(), unread: row.read_at === null,
+    createdAt: timestampIso(row.created_at), unread: row.read_at === null,
   }));
   const deliveredIds = items.map((item) => item.id);
   if (deliveredIds.length) await sql`
@@ -409,7 +413,7 @@ export async function pendingAgentNotices(sql: Sql, principal: AgentPrincipal) {
   `;
   return rows.map((row) => ({
     id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
-    subject: String(row.subject), senderHandle: String(row.sender_handle), createdAt: (row.created_at as Date).toISOString(), unread: true,
+    subject: String(row.subject), senderHandle: String(row.sender_handle), createdAt: timestampIso(row.created_at), unread: true,
   }));
 }
 
@@ -459,7 +463,7 @@ export async function readAgentMessage(sql: Sql, principal: AgentPrincipal, mess
   return { id: String(row.id), threadId: String(row.thread_id), type: String(row.type), priority: String(row.priority),
     subject: String(row.subject), body: String(row.body), parts: row.parts,
     senderHandle: row.sender_user_id ? "human" : sender[0] ? String(sender[0].handle) : null,
-    createdAt: (row.created_at as Date).toISOString() };
+    createdAt: timestampIso(row.created_at) };
 }
 
 export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threadId: string) {
@@ -492,7 +496,7 @@ export async function readAgentThread(sql: Sql, principal: AgentPrincipal, threa
         id: String(row.id), type: String(row.type), priority: String(row.priority),
         subject: String(row.subject), body: String(row.body), parts: row.parts,
         senderHandle: row.sender_handle ? String(row.sender_handle) : null,
-        createdAt: (row.created_at as Date).toISOString(),
+        createdAt: timestampIso(row.created_at),
       })),
     };
   });
