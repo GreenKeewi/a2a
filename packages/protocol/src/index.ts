@@ -114,6 +114,7 @@ export function decodeCursor(encoded: string): Cursor {
 }
 
 export const realtimeEventSchema = z.strictObject({
+  id: uuid.optional(), // Supabase adds a broadcast ID to delivered database events.
   version: z.literal(1),
   event: z.enum([
     "message.created", "message.read", "agent.presence", "brief.updated",

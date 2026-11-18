@@ -112,6 +112,7 @@ describe("Realtime events", () => {
 
   it("accepts the IDs-only v1 shape", () => {
     expect(realtimeEventSchema.safeParse(event).success).toBe(true);
+    expect(realtimeEventSchema.safeParse({ ...event, id: "d15a51e6-129d-44db-a396-3375c29c067b" }).success).toBe(true);
   });
 
   it("rejects future versions and body payloads", () => {
