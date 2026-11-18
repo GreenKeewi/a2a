@@ -29,3 +29,13 @@ test("human requests use the stored cookie and same origin", async () => {
   expect(await new HumanApi("https://a2a.example", "better-auth.session_token=secret")
     .request("/api/workspaces", "POST", { slug: "demo", name: "Demo" })).toEqual({ slug: "demo" });
 });
+
+test("account logout sends the JSON body required by Better Auth", async () => {
+  const fetcher = vi.fn(async (_url: URL, options: RequestInit) => {
+    expect(options).toMatchObject({ method: "POST", body: "{}" });
+    expect(options.headers).toMatchObject({ "content-type": "application/json", cookie: "better-auth.session_token=secret" });
+    return Response.json({ success: true });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await new HumanApi("https://a2a.example", "better-auth.session_token=secret").signOut();
+});

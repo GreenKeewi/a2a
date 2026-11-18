@@ -52,6 +52,11 @@ export async function respond(handler: () => Promise<unknown>) {
       code === "INVALID_INVITE" || code === "INVALID_BRIEF" || code === "INVALID_PAIRING_CODE" || code === "INVALID_ROUTE" ? "INVALID_REQUEST" : code;
     const status = apiCode === "UNAUTHENTICATED" ? 401 : apiCode === "FORBIDDEN" ? 403 : apiCode === "CONFLICT" ? 409 :
       apiCode === "NOT_FOUND" ? 404 : apiCode === "INVALID_REQUEST" ? 400 : 500;
+    if (status === 500) {
+      const trace = error instanceof Error ? error.stack?.split("\n").slice(1, 3).map((line) => line.trim()) : [];
+      console.error(JSON.stringify({ event: "a2a.internal_error", requestId,
+        type: error instanceof Error ? error.name : typeof error, trace }));
+    }
     recordRequestMetric({ surface: "api", status, durationMs: performance.now() - started,
       requestId, errorCode: status === 500 && typeof databaseCode === "string" ? databaseCode : apiCode });
     return Response.json({ data: null, error: { code: apiCode, message: apiCode }, requestId }, { status, headers: { "cache-control": "no-store" } });

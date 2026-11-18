@@ -54,7 +54,8 @@ export class HumanApi {
   async signOut(): Promise<void> {
     if (!this.cookie) return;
     const response = await fetch(new URL("/api/auth/sign-out", this.origin), {
-      method: "POST", headers: { origin: this.origin, cookie: this.cookie },
+      method: "POST", headers: { origin: this.origin, cookie: this.cookie, "content-type": "application/json" },
+      body: "{}",
     });
     if (!response.ok) throw new Error(`Account sign-out failed (HTTP ${response.status}).`);
   }
