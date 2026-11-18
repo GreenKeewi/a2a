@@ -2,6 +2,8 @@ import { generateText, Output } from "ai";
 import type { Sql } from "postgres";
 import { z } from "zod";
 
+import { recordSmartBatchMetric } from "./observability";
+
 const promptVersion = "a2a-triage-v1";
 const smartResultSchema = z.strictObject({
   summary: z.string().trim().min(1).max(400).nullable(),
@@ -57,6 +59,7 @@ async function withinDeadline(model: SmartModel, input: SmartInput, deadlineMs: 
 }
 
 export async function runSmartJobs(sql: Sql, options: { modelId?: string; model?: SmartModel; limit?: number; deadlineMs?: number } = {}) {
+  const started = performance.now();
   const modelId = options.modelId ?? process.env.A2A_TRIAGE_MODEL;
   if (!modelId) return { processed: 0, completed: 0, failed: 0, skipped: 0 };
   const model = options.model ?? gatewayModel;
@@ -187,5 +190,6 @@ export async function runSmartJobs(sql: Sql, options: { modelId?: string; model?
       counts.failed++;
     }
   }
+  recordSmartBatchMetric(counts, performance.now() - started);
   return counts;
 }

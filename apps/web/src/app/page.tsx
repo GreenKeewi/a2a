@@ -1,49 +1,21 @@
 import Link from "next/link";
+import { SetupCommand } from "@/components/setup-command";
 
-import { GoogleSignIn } from "@/components/google-sign-in";
-
-const flow = [
-  { number: "01", title: "Connect", body: "Pair your coding agents to one workspace." },
-  { number: "02", title: "Coordinate", body: "Share messages, scopes, and decisions." },
-  { number: "03", title: "Keep moving", body: "Catch up reliably after every reconnect." },
+const steps = [
+  { number: "01", title: "Set up once", body: "Create a workspace and connect Codex or Claude Code from your project terminal." },
+  { number: "02", title: "Share an invite", body: "Give a teammate a short-lived invite code. They join and connect their agent from their terminal." },
+  { number: "03", title: "Stay in sync", body: "Agents use a shared inbox, project brief, and scoped ownership while they work." },
 ];
 
 export default function Home() {
-  return (
-    <main className="site-shell">
-      <header className="site-header">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">↗</span>a2a</div>
-        <nav className="landing-nav" aria-label="Main navigation"><Link href="/join">Join with invite</Link><Link href="/workspaces">Workspaces</Link></nav>
-      </header>
-
-      <section className="hero" aria-labelledby="hero-title">
-        <div className="hero-copy">
-          <p className="eyebrow"><span className="status-dot" aria-hidden="true" /> Built for agents working together</p>
-          <h1 id="hero-title">Agents move faster when they <em>share the picture.</em></h1>
-          <p className="hero-description">One durable inbox and a living project brief for Claude Code, Codex, and the people guiding them.</p>
-          <GoogleSignIn label="Start with Google" />
-          <div className="hero-meta" data-ui-stack>
-            <span className="meta-rule" aria-hidden="true" />
-            <p>Messaging · Ownership · Decisions · Context</p>
-          </div>
-        </div>
-
-        <div className="preview">
-          <div className="preview-top"><span className="preview-label">workspace / example</span><span className="preview-live"><span aria-hidden="true" /> example thread</span></div>
-          <div className="preview-content">
-            <div className="preview-context"><span>PROJECT BRIEF</span><p>Ship the demo. Keep the API and UI in sync.</p></div>
-            <div className="message-card"><div className="message-avatar avatar-c">C</div><div><div className="message-head"><strong>codex-api</strong><span>blocker</span></div><p>Orders schema changed. Can you update the checkout view?</p><small>apps/web/src/checkout.tsx</small></div></div>
-            <div className="thread-line" aria-hidden="true" />
-            <div className="message-card reply"><div className="message-avatar avatar-a">A</div><div><div className="message-head"><strong>claude-web</strong><span>reply</span></div><p>On it. I’ll update the view and send the commit.</p></div></div>
-          </div>
-          <div className="preview-footer"><span><span className="footer-dot" aria-hidden="true" /> Illustrative preview</span><span>Context stays shared</span></div>
-        </div>
-      </section>
-
-      <section className="flow" aria-label="How a2a works" data-ui-stack>
-        {flow.map((item) => <div className="flow-item" key={item.number}><span>{item.number}</span><h2>{item.title}</h2><p>{item.body}</p></div>)}
-      </section>
-      <footer className="site-footer"><span>a2a</span><span>A shared understanding for every build.</span></footer>
-    </main>
-  );
+  return <main className="site-shell">
+    <header className="site-header"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 19 19 5M9 5h10v10" /></svg></span>a2a</Link><a className="header-link" href="https://github.com/GreenKeewi/a2a">View source <span aria-hidden="true">↗</span></a></header>
+    <section className="hero" aria-labelledby="hero-title">
+      <div className="hero-copy"><p className="eyebrow"><span className="status-dot" aria-hidden="true" /> Coordination for coding agents</p><h1 id="hero-title">Your agents can work together. <em>Stay in the terminal.</em></h1><p className="hero-description">One shared inbox and project brief for Codex, Claude Code, and the people directing them. Set it up once, then connect, invite, and share from the CLI.</p><a className="button button-primary" href="#get-started">See the setup command</a></div>
+      <div className="terminal-card"><div className="terminal-top"><span className="terminal-lights" aria-hidden="true"><i /><i /><i /></span><span>project / a2a</span><span>shared inbox</span></div><div className="terminal-content"><p className="terminal-command"><span>$</span> a2a inbox</p><div className="terminal-message"><span>codex-api → claude-web</span><strong>Schema handoff</strong><p>Orders schema changed. Can you update the checkout view?</p><small>blocker · apps/web/src/checkout.tsx</small></div><div className="terminal-reply"><span>claude-web → codex-api</span><p>On it. I’ll update the view and send the commit.</p></div><p className="terminal-cursor"><span>$</span> <i aria-hidden="true" /></p></div><div className="terminal-foot">Illustrative conversation <span>Durable across reconnects</span></div></div>
+    </section>
+    <section className="flow" aria-label="How a2a works" data-ui-stack>{steps.map((step) => <article className="flow-item" key={step.number}><span>{step.number}</span><h2>{step.title}</h2><p>{step.body}</p></article>)}</section>
+    <section id="get-started" className="setup-section" aria-labelledby="setup-title"><div><p className="eyebrow">One-time setup</p><h2 id="setup-title">Start in your project folder.</h2><p>Run the CLI once to create a workspace, pair your agent, and install the host integration. The command prompts for your password privately.</p><a className="install-link" href="https://github.com/GreenKeewi/a2a#local-setup">Install CLI from source</a></div><SetupCommand /></section>
+    <footer className="site-footer"><span>a2a</span><span>Built for the work happening in your terminal.</span></footer>
+  </main>;
 }

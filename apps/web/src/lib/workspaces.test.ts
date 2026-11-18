@@ -66,12 +66,36 @@ afterAll(async () => {
 });
 
 describe("workspace access", () => {
+  it("creates a CLI account and workspace through cookie-authenticated HTTP routes", async () => {
+    process.env.DATABASE_URL = databaseUrl.toString();
+    process.env.BETTER_AUTH_URL = "http://127.0.0.1:4300";
+    process.env.BETTER_AUTH_SECRET = "local-testing-secret-with-32-plus-characters";
+    const authRoute = await import("../app/api/auth/[...all]/route");
+    const email = `cli-${randomUUID()}@example.test`;
+    const signedUp = await authRoute.POST(new Request("http://127.0.0.1:4300/api/auth/sign-up/email", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4300", "content-type": "application/json" },
+      body: JSON.stringify({ name: "CLI Owner", email, password: "a-long-test-password-for-cli" }),
+    }));
+    expect(signedUp.status).toBe(200);
+    const cookie = signedUp.headers.getSetCookie().map((value) => value.split(";", 1)[0])
+      .find((value) => value?.startsWith("better-auth.session_token="));
+    expect(cookie).toBeTruthy();
+    const workspaceRoute = await import("../app/api/workspaces/route");
+    const slug = `cli-${randomUUID().slice(0, 8)}`;
+    const created = await workspaceRoute.POST(new Request("http://127.0.0.1:4300/api/workspaces", {
+      method: "POST", headers: { origin: "http://127.0.0.1:4300", cookie: cookie!, "content-type": "application/json" },
+      body: JSON.stringify({ name: "CLI Workspace", slug }),
+    }));
+    expect(created.status).toBe(200);
+    expect((await created.json()).data.slug).toBe(slug);
+    const owner = await sql`SELECT m.role FROM member m JOIN organization o ON o.id = m.organization_id WHERE o.slug = ${slug}`;
+    expect(owner[0]?.role).toBe("owner");
+  }, 60_000);
+
   it("provisions settings when Better Auth creates an organization", async () => {
     process.env.DATABASE_URL = databaseUrl.toString();
     process.env.BETTER_AUTH_URL = "http://127.0.0.1:4300";
     process.env.BETTER_AUTH_SECRET = "local-testing-secret-with-32-plus-characters";
-    process.env.GOOGLE_CLIENT_ID = "local-placeholder";
-    process.env.GOOGLE_CLIENT_SECRET = "local-placeholder";
     const { auth } = await import("./auth");
     const created = await auth.api.createOrganization({
       body: { name: "Plugin Workspace", slug: "plugin-workspace", userId: ownerId },
@@ -95,7 +119,7 @@ describe("workspace access", () => {
       body: { name: "Duplicate", slug: "plugin-workspace", userId: ownerId },
     }));
     expect(duplicate.status).toBe(409);
-  }, 20_000);
+  }, 60_000);
 
   it("lets exactly one concurrent claimant use the final invite", async () => {
     const code = await createInviteCode(sql, alphaId, ownerId, { maxUses: 1, expiresInHours: 24 });

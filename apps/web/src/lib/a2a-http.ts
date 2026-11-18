@@ -6,6 +6,7 @@ import { AgentError } from "./agents";
 import { A2ABridgeHandler, makeAgentCard } from "./a2a-bridge";
 import { sql } from "./db";
 import { requireAgent } from "./http";
+import { recordRequestMetric } from "./observability";
 import { runSmartJobs } from "./smart-worker";
 
 function baseUrl() {
@@ -34,10 +35,16 @@ export function gatewayCardResponse() {
 }
 
 export async function a2aRpcResponse(request: Request, fixedTarget?: string) {
+  const started = performance.now();
+  const finish = (response: Response, errorCode?: string) => {
+    recordRequestMetric({ surface: "a2a_rpc", status: response.status,
+      durationMs: performance.now() - started, ...(errorCode ? { errorCode } : {}) });
+    return response;
+  };
   let principal;
   try { principal = await requireAgent(request); }
   catch (error) {
-    if (error instanceof AgentError) return Response.json({ error: "UNAUTHENTICATED" }, { status: 401 });
+    if (error instanceof AgentError) return finish(Response.json({ error: "UNAUTHENTICATED" }, { status: 401 }), "UNAUTHENTICATED");
     throw error;
   }
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -47,12 +54,12 @@ export async function a2aRpcResponse(request: Request, fixedTarget?: string) {
       if (typeof parsed === "object" && parsed && "id" in parsed &&
           (typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null)) id = parsed.id;
     } catch { /* An invalid body has no request ID to echo. */ }
-    return Response.json({ jsonrpc: "2.0", id,
+    return finish(Response.json({ jsonrpc: "2.0", id,
       error: { code: -32005, message: "Content type not supported" } },
-    { status: 415, headers: { "cache-control": "no-store" } });
+    { status: 415, headers: { "cache-control": "no-store" } }), "CONTENT_TYPE_NOT_SUPPORTED");
   }
   const body = await request.text();
-  if (body.length > 256_000) return Response.json({ error: "REQUEST_TOO_LARGE" }, { status: 413 });
+  if (body.length > 256_000) return finish(Response.json({ error: "REQUEST_TOO_LARGE" }, { status: 413 }), "REQUEST_TOO_LARGE");
   const card = makeAgentCard(baseUrl());
   const context = new ServerCallContext({ requestedVersion: request.headers.get("a2a-version") ?? "0.3",
     user: { isAuthenticated: true, userName: principal.agentId } });
@@ -65,12 +72,12 @@ export async function a2aRpcResponse(request: Request, fixedTarget?: string) {
       if (typeof parsed === "object" && parsed && "id" in parsed &&
           (typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null)) id = parsed.id;
     } catch { /* The SDK already handles malformed JSON. */ }
-    return Response.json({ jsonrpc: "2.0", id, error: { code: -32004, message: "Streaming is not supported" } },
-      { headers: { "cache-control": "no-store" } });
+    return finish(Response.json({ jsonrpc: "2.0", id, error: { code: -32004, message: "Streaming is not supported" } },
+      { headers: { "cache-control": "no-store" } }), "STREAMING_NOT_SUPPORTED");
   }
   if ((result.error as { code?: number } | undefined)?.code === -32603) {
-    return Response.json({ jsonrpc: "2.0", id: result.id, error: { code: -32603, message: "Internal error" } },
-      { headers: { "cache-control": "no-store" } });
+    return finish(Response.json({ jsonrpc: "2.0", id: result.id, error: { code: -32603, message: "Internal error" } },
+      { headers: { "cache-control": "no-store" } }), "INTERNAL_ERROR");
   }
   if (!result.error && process.env.A2A_TRIAGE_MODEL) {
     try {
@@ -80,5 +87,6 @@ export async function a2aRpcResponse(request: Request, fixedTarget?: string) {
       }
     } catch { /* The SDK has already handled malformed JSON. */ }
   }
-  return Response.json(result, { headers: { "cache-control": "no-store" } });
+  return finish(Response.json(result, { headers: { "cache-control": "no-store" } }),
+    result.error ? String((result.error as { code?: number }).code ?? "PROTOCOL_ERROR") : undefined);
 }

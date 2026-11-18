@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -78,6 +78,10 @@ export async function saveHostIdentity(projectRoot: string, identity: HostIdenti
 export async function findHostIdentity(projectRoot: string, hostType: HostIdentity["hostType"]): Promise<HostIdentity> {
   try { return hostIdentitySchema.parse(JSON.parse(await readFile(hostIdentityPath(projectRoot, hostType), "utf8"))); }
   catch { throw new Error(`No ${hostType} identity found for this project. Run a2a init --host ${hostType}.`); }
+}
+
+export async function deleteHostIdentity(projectRoot: string, hostType: HostIdentity["hostType"]) {
+  await rm(hostIdentityPath(projectRoot, hostType), { force: true });
 }
 
 export interface CredentialStore {

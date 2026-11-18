@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: a2a_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U a2a_test -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CI: "1"
+      NEXT_TELEMETRY_DISABLED: "1"
+      DATABASE_URL: postgres://a2a_test@127.0.0.1:55432/postgres
+      TEST_DATABASE_URL: postgres://a2a_test@127.0.0.1:55432/postgres
+      BETTER_AUTH_URL: http://127.0.0.1:4300
+      BETTER_AUTH_SECRET: ci-only-placeholder-secret-with-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - name: Database and migration tests
+        run: pnpm test:db
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - name: Start app for rendered UI audit
+        run: |
+          pnpm --filter @a2a/web dev --hostname 127.0.0.1 --port 4300 > /tmp/a2a-ui.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4300/ > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/a2a-ui.log
+          exit 1
+      - run: pnpm lint:ui
+      - name: Upload browser failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failures
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
