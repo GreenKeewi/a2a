@@ -4,15 +4,15 @@ Hosted coordination for coding agents. The website is a public landing page; all
 
 ## Current state
 
-The implementation includes the protocol, workspace and agent APIs, private Realtime subscriptions, CLI, four MCP tools, Claude Code/Codex lifecycle hooks, optional smart suggestions, and an authenticated Agent2Agent bridge. Email and password are entered once in a private CLI prompt; the session and agent token are stored in the OS credential store. Hosted deployment and a real two-machine exchange still require production verification.
+The implementation includes the protocol, workspace and agent APIs, private Realtime subscriptions, CLI, four MCP tools, Claude Code/Codex lifecycle hooks, optional smart suggestions, and an authenticated Agent2Agent bridge. Email and password are entered in a private CLI prompt; the session and agent token are stored in the OS credential store. The hosted CLI journey has been verified with two accounts and isolated project folders on one machine. A physical two-machine run remains unverified.
 
-The [release and operations guide](docs/operations.md) covers CI, deployment, cross-machine acceptance, rollback, key rotation, and incident handling. The dedicated Supabase project is provisioned in Apps, Canada Central, with seven migrations applied; its live flows still need production acceptance.
+The [release and operations guide](docs/operations.md) covers CI, deployment, cross-machine acceptance, rollback, key rotation, and incident handling. The dedicated Supabase project is provisioned in Apps, Canada Central, with seven migrations applied. [Production acceptance evidence](docs/acceptance-2026-11-18.md) records the tested CLI flows and remaining physical-machine limit.
 
 ## Local setup
 
 Requires Node.js 22+ and pnpm 11.4.0.
 
-For the source-installed CLI, clone this repository, then run `pnpm install --frozen-lockfile` and `pnpm --filter @a2a/sidecar build`. Keep the clone in place: the compiled CLI and host hooks run from it. The `a2a` examples below mean `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` until a standalone CLI package is published.
+For the source-installed CLI, clone this repository, then run `pnpm install --frozen-lockfile` and `pnpm --filter @a2a/sidecar build`. Keep the clone in place: the compiled CLI and host hooks run from it. The `a2a` examples below mean `node /absolute/path/to/a2a/packages/sidecar/dist/cli.js` until a standalone CLI package is published. npm publishing is not configured for this repository.
 
 Set `DATABASE_URL`, `BETTER_AUTH_URL`, and `BETTER_AUTH_SECRET` in `apps/web/.env.local` using `apps/web/.env.example` as a guide. Apply the ordered SQL files in `supabase/migrations/` to a dedicated PostgreSQL database before starting the app. These files are the only deployable migrations; do not run `drizzle-kit migrate` or `push` against the hosted database. Drizzle schema generation can be used to draft future SQL, which must then be reviewed and placed in `supabase/migrations/`.
 

@@ -1,7 +1,7 @@
 # a2a — CLI-first product plan
 
 **Updated:** 2026-11-18
-**Status:** implementation in progress; production acceptance outstanding.
+**Status:** CLI-first product deployed; same-machine production journey verified. Physical two-machine acceptance and standalone CLI distribution remain outstanding.
 
 ## Product
 
